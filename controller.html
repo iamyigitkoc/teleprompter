@@ -103,6 +103,40 @@
                     <span id="font-size-display">48px</span>
                 </div>
                 
+                <!-- Scroll Control Section -->
+                <div class="control-group scroll-controls">
+                    <label>Scroll Control:</label>
+                    <div class="scroll-buttons">
+                        <button id="prev-paragraph-btn" class="scroll-btn" title="Previous Paragraph (Page Up)">
+                            <span class="btn-icon">⏮</span>
+                            <span class="btn-text">Prev ¶</span>
+                        </button>
+                        <button id="scroll-up-btn" class="scroll-btn" title="Scroll Up (Up Arrow)">
+                            <span class="btn-icon">▲</span>
+                            <span class="btn-text">Up</span>
+                        </button>
+                        <button id="scroll-down-btn" class="scroll-btn" title="Scroll Down (Down Arrow)">
+                            <span class="btn-icon">▼</span>
+                            <span class="btn-text">Down</span>
+                        </button>
+                        <button id="next-paragraph-btn" class="scroll-btn" title="Next Paragraph (Page Down)">
+                            <span class="btn-icon">⏭</span>
+                            <span class="btn-text">Next ¶</span>
+                        </button>
+                    </div>
+                    <div class="scroll-amount-control">
+                        <label for="scroll-amount">Scroll Amount:</label>
+                        <input type="range" id="scroll-amount" min="50" max="500" value="150">
+                        <span id="scroll-amount-display">150px</span>
+                    </div>
+                    <div class="paragraph-navigator">
+                        <label for="paragraph-select">Jump to Paragraph:</label>
+                        <select id="paragraph-select">
+                            <option value="">-- Select Paragraph --</option>
+                        </select>
+                    </div>
+                </div>
+                
                 <div class="control-group">
                     <label for="scheduled-start">Scheduled Start Time:</label>
                     <div class="scheduled-time-group">

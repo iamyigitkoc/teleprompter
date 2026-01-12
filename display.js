@@ -18,22 +18,23 @@ class TeleprompterDisplay {
         this.reconnectDelay = 1000;
         
         // Connection type tracking
-        this.connectionType = null; // 'websocket' or 'polling'
+        this.connectionType = null;
         this.pollingInterval = null;
-        this.pollDelay = 1000; // Poll every 1 second
+        this.pollDelay = 1000;
         this.clientId = this.generateClientId();
         this.lastEventId = 0;
+        
+        // Paragraph tracking
+        this.currentParagraphIndex = 0;
+        this.paragraphPositions = [];
         
         this.initializeElements();
         this.connect();
         this.bindKeyboardShortcuts();
-        
-        // Auto-reconnect on connection loss
         this.setupReconnection();
     }
     
     generateClientId() {
-        // Generate a unique client ID for polling sessions
         return 'display_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
     }
     
@@ -55,7 +56,6 @@ class TeleprompterDisplay {
     // ========================================
     
     connect() {
-        // Check if WebSocket is supported
         if (this.supportsWebSocket()) {
             this.connectWebSocket();
         } else {
@@ -71,10 +71,6 @@ class TeleprompterDisplay {
             return false;
         }
     }
-    
-    // ========================================
-    // WebSocket Connection
-    // ========================================
     
     connectWebSocket() {
         try {
@@ -116,7 +112,6 @@ class TeleprompterDisplay {
             
             this.connection.onerror = (error) => {
                 console.error('WebSocket error:', error);
-                // On WebSocket error, try falling back to polling
                 if (this.reconnectAttempts >= 2) {
                     console.log('Multiple WebSocket failures, trying polling fallback');
                     this.connectionType = null;
@@ -129,20 +124,14 @@ class TeleprompterDisplay {
         } catch (error) {
             console.error('Failed to connect via WebSocket:', error);
             this.updateConnectionStatus('disconnected', 'WebSocket Failed');
-            // Fall back to polling
             this.connectPolling();
         }
     }
-    
-    // ========================================
-    // Long Polling Connection (Fallback)
-    // ========================================
     
     connectPolling() {
         this.connectionType = 'polling';
         this.updateConnectionStatus('connecting', 'Connecting (Polling)...');
         
-        // Register with server via HTTP
         this.registerPolling()
             .then(() => {
                 this.updateConnectionStatus('connected', 'Connected (Poll)');
@@ -168,10 +157,8 @@ class TeleprompterDisplay {
             clearInterval(this.pollingInterval);
         }
         
-        // Initial poll
         this.poll();
         
-        // Continue polling at regular intervals
         this.pollingInterval = setInterval(() => {
             this.poll();
         }, this.pollDelay);
@@ -205,41 +192,12 @@ class TeleprompterDisplay {
             });
     }
     
-    // ========================================
-    // HTTP Request Helper (for polling)
-    // ========================================
-    
     httpRequest(method, url, data) {
         return new Promise((resolve, reject) => {
-            var xhr;
-            
-            // Support for older browsers
-            if (window.XMLHttpRequest) {
-                xhr = new XMLHttpRequest();
-            } else if (window.ActiveXObject) {
-                // IE6 and older
-                try {
-                    xhr = new ActiveXObject('Msxml2.XMLHTTP');
-                } catch (e) {
-                    try {
-                        xhr = new ActiveXObject('Microsoft.XMLHTTP');
-                    } catch (e2) {
-                        reject(new Error('XMLHttpRequest not supported'));
-                        return;
-                    }
-                }
-            } else {
-                reject(new Error('XMLHttpRequest not supported'));
-                return;
-            }
-            
+            var xhr = new XMLHttpRequest();
             xhr.open(method, url, true);
             xhr.setRequestHeader('Content-Type', 'application/json');
-            
-            // Timeout for old devices
-            if (typeof xhr.timeout !== 'undefined') {
-                xhr.timeout = 30000; // 30 second timeout
-            }
+            xhr.timeout = 30000;
             
             xhr.onreadystatechange = function() {
                 if (xhr.readyState === 4) {
@@ -260,11 +218,9 @@ class TeleprompterDisplay {
                 reject(new Error('Network error'));
             };
             
-            if (typeof xhr.ontimeout !== 'undefined') {
-                xhr.ontimeout = function() {
-                    reject(new Error('Request timeout'));
-                };
-            }
+            xhr.ontimeout = function() {
+                reject(new Error('Request timeout'));
+            };
             
             if (data) {
                 xhr.send(JSON.stringify(data));
@@ -273,10 +229,6 @@ class TeleprompterDisplay {
             }
         });
     }
-    
-    // ========================================
-    // Reconnection Logic
-    // ========================================
     
     scheduleReconnect() {
         if (this.reconnectAttempts < this.maxReconnectAttempts) {
@@ -297,46 +249,24 @@ class TeleprompterDisplay {
     setupReconnection() {
         var self = this;
         
-        // Try to reconnect when the page becomes visible again
-        if (document.addEventListener) {
-            document.addEventListener('visibilitychange', function() {
-                if (!document.hidden) {
-                    var needsReconnect = false;
-                    
-                    if (self.connectionType === 'websocket') {
-                        needsReconnect = !self.connection || self.connection.readyState !== WebSocket.OPEN;
-                    } else if (self.connectionType === 'polling') {
-                        needsReconnect = !self.pollingInterval;
-                    } else {
-                        needsReconnect = true;
-                    }
-                    
-                    if (needsReconnect) {
-                        self.reconnectAttempts = 0;
-                        self.connect();
-                    }
+        document.addEventListener('visibilitychange', function() {
+            if (!document.hidden) {
+                var needsReconnect = false;
+                
+                if (self.connectionType === 'websocket') {
+                    needsReconnect = !self.connection || self.connection.readyState !== WebSocket.OPEN;
+                } else if (self.connectionType === 'polling') {
+                    needsReconnect = !self.pollingInterval;
+                } else {
+                    needsReconnect = true;
                 }
-            });
-        }
-    }
-    
-    // ========================================
-    // Send Messages (works with both connections)
-    // ========================================
-    
-    send(data) {
-        if (this.connectionType === 'websocket' && this.connection && 
-            this.connection.readyState === WebSocket.OPEN) {
-            this.connection.send(JSON.stringify(data));
-        } else if (this.connectionType === 'polling') {
-            // Send via HTTP POST for polling mode
-            this.httpRequest('POST', '/api/send', {
-                clientId: this.clientId,
-                message: data
-            }).catch(function(error) {
-                console.error('Failed to send message:', error);
-            });
-        }
+                
+                if (needsReconnect) {
+                    self.reconnectAttempts = 0;
+                    self.connect();
+                }
+            }
+        });
     }
     
     // ========================================
@@ -360,6 +290,7 @@ class TeleprompterDisplay {
             case 'setFontSize':
                 this.fontSize = data.value;
                 this.prompterText.style.fontSize = this.fontSize + 'px';
+                this.calculateParagraphPositions();
                 break;
                 
             case 'setSegmentLength':
@@ -399,8 +330,32 @@ class TeleprompterDisplay {
                 this.reset();
                 break;
                 
+            // Scroll control messages
+            case 'scrollUp':
+                this.scrollUp(data.pixels || 100);
+                break;
+                
+            case 'scrollDown':
+                this.scrollDown(data.pixels || 100);
+                break;
+                
+            case 'nextParagraph':
+                this.goToNextParagraph();
+                break;
+                
+            case 'prevParagraph':
+                this.goToPrevParagraph();
+                break;
+                
+            case 'goToParagraph':
+                this.goToParagraphByIndex(data.index || 0);
+                break;
+                
+            case 'setScrollPosition':
+                this.setScrollPosition(data.position || 0);
+                break;
+                
             case 'pong':
-                // Heartbeat response
                 break;
                 
             default:
@@ -439,6 +394,92 @@ class TeleprompterDisplay {
         }
         
         this.updateCountdownDisplay();
+        this.calculateParagraphPositions();
+    }
+    
+    // ========================================
+    // Scroll Control Methods
+    // ========================================
+    
+    scrollUp(pixels) {
+        this.currentPosition = Math.max(0, this.currentPosition - pixels);
+        this.updateScrollPosition();
+    }
+    
+    scrollDown(pixels) {
+        this.currentPosition += pixels;
+        this.updateScrollPosition();
+    }
+    
+    setScrollPosition(position) {
+        this.currentPosition = Math.max(0, position);
+        this.updateScrollPosition();
+    }
+    
+    updateScrollPosition() {
+        var translateY = -(this.currentPosition / window.innerHeight) * 100;
+        var transform = 'translateY(' + translateY + '%)';
+        this.prompterText.style.transform = transform;
+        this.prompterText.style.webkitTransform = transform;
+    }
+    
+    calculateParagraphPositions() {
+        this.paragraphPositions = [];
+        var paragraphs = this.prompterText.querySelectorAll('p');
+        var baseOffset = this.prompterText.offsetTop;
+        
+        for (var i = 0; i < paragraphs.length; i++) {
+            this.paragraphPositions.push(paragraphs[i].offsetTop - baseOffset);
+        }
+    }
+    
+    goToNextParagraph() {
+        if (this.paragraphPositions.length === 0) {
+            this.calculateParagraphPositions();
+        }
+        
+        // Find the next paragraph after current position
+        for (var i = 0; i < this.paragraphPositions.length; i++) {
+            if (this.paragraphPositions[i] > this.currentPosition + 10) {
+                this.currentParagraphIndex = i;
+                this.currentPosition = this.paragraphPositions[i];
+                this.updateScrollPosition();
+                return;
+            }
+        }
+    }
+    
+    goToPrevParagraph() {
+        if (this.paragraphPositions.length === 0) {
+            this.calculateParagraphPositions();
+        }
+        
+        // Find the previous paragraph before current position
+        for (var i = this.paragraphPositions.length - 1; i >= 0; i--) {
+            if (this.paragraphPositions[i] < this.currentPosition - 10) {
+                this.currentParagraphIndex = i;
+                this.currentPosition = this.paragraphPositions[i];
+                this.updateScrollPosition();
+                return;
+            }
+        }
+        
+        // Go to start if no previous paragraph
+        this.currentPosition = 0;
+        this.currentParagraphIndex = 0;
+        this.updateScrollPosition();
+    }
+    
+    goToParagraphByIndex(index) {
+        if (this.paragraphPositions.length === 0) {
+            this.calculateParagraphPositions();
+        }
+        
+        if (index >= 0 && index < this.paragraphPositions.length) {
+            this.currentParagraphIndex = index;
+            this.currentPosition = this.paragraphPositions[index];
+            this.updateScrollPosition();
+        }
     }
     
     // ========================================
@@ -447,29 +488,28 @@ class TeleprompterDisplay {
     
     setPrompterText(text) {
         if (typeof text === 'string') {
-            var paragraphs = text.split('\n\n');
-            var filtered = [];
-            for (var i = 0; i < paragraphs.length; i++) {
-                var trimmed = paragraphs[i].replace(/^\s+|\s+$/g, '');
-                if (trimmed.length > 0) {
-                    filtered.push(trimmed);
-                }
-            }
-            var html = '';
-            for (var j = 0; j < filtered.length; j++) {
-                html += '<p>' + filtered[j] + '</p>';
-            }
-            this.prompterText.innerHTML = html;
+            var paragraphs = text.split('\n\n').filter(function(p) {
+                return p.trim().length > 0;
+            });
+            this.prompterText.innerHTML = paragraphs.map(function(p) {
+                return '<p>' + p.trim() + '</p>';
+            }).join('');
         } else {
             this.prompterText.innerHTML = text;
         }
+        
+        // Recalculate paragraph positions after text change
+        var self = this;
+        setTimeout(function() {
+            self.calculateParagraphPositions();
+        }, 100);
     }
     
     setMirrorMode(enabled) {
         if (enabled) {
-            this.addClass(document.body, 'mirror-mode');
+            document.body.classList.add('mirror-mode');
         } else {
-            this.removeClass(document.body, 'mirror-mode');
+            document.body.classList.remove('mirror-mode');
         }
     }
     
@@ -482,9 +522,9 @@ class TeleprompterDisplay {
     
     setOnAir(enabled) {
         if (enabled) {
-            this.addClass(this.onAirIndicator, 'active');
+            this.onAirIndicator.classList.add('active');
         } else {
-            this.removeClass(this.onAirIndicator, 'active');
+            this.onAirIndicator.classList.remove('active');
         }
     }
     
@@ -493,20 +533,20 @@ class TeleprompterDisplay {
         var targetDate = new Date(scheduledTime);
         this.countdownTarget.textContent = 'Starting at: ' + targetDate.toLocaleTimeString();
         
-        this.addClass(this.scheduledCountdown, 'active');
+        this.scheduledCountdown.classList.add('active');
         this.startScheduledCountdown();
     }
     
     clearScheduledStart() {
         this.scheduledStartTime = null;
-        this.removeClass(this.scheduledCountdown, 'active');
+        this.scheduledCountdown.classList.remove('active');
         this.stopScheduledCountdown();
     }
     
     startScheduledCountdown() {
         this.stopScheduledCountdown();
-        
         var self = this;
+        
         this.scheduledCountdownInterval = setInterval(function() {
             var now = Date.now();
             var timeRemaining = self.scheduledStartTime - now;
@@ -566,18 +606,19 @@ class TeleprompterDisplay {
         this.currentPosition = 0;
         this.startTime = null;
         this.pausedTime = 0;
+        this.currentParagraphIndex = 0;
         
         this.stopScrolling();
         this.stopTimer();
         
         this.prompterText.style.transform = 'translateY(0%)';
+        this.prompterText.style.webkitTransform = 'translateY(0%)';
         this.updateDisplay();
     }
     
     startScrolling() {
         var self = this;
         
-        // Use requestAnimationFrame if available, otherwise fall back to setTimeout
         var animate = window.requestAnimationFrame || 
                       window.webkitRequestAnimationFrame || 
                       window.mozRequestAnimationFrame ||
@@ -593,14 +634,9 @@ class TeleprompterDisplay {
             self.currentPosition += pixelsPerFrame;
             
             var translateY = -(self.currentPosition / window.innerHeight) * 100;
-            
-            // Use vendor-prefixed transforms for older browsers
             var transform = 'translateY(' + translateY + '%)';
             self.prompterText.style.transform = transform;
             self.prompterText.style.webkitTransform = transform;
-            self.prompterText.style.mozTransform = transform;
-            self.prompterText.style.msTransform = transform;
-            self.prompterText.style.oTransform = transform;
             
             self.animationId = animate(scroll);
         };
@@ -653,9 +689,9 @@ class TeleprompterDisplay {
         
         this.countdownTimer.className = '';
         if (remaining < 60000) {
-            this.addClass(this.countdownTimer, 'danger');
+            this.countdownTimer.classList.add('danger');
         } else if (remaining < 300000) {
-            this.addClass(this.countdownTimer, 'warning');
+            this.countdownTimer.classList.add('warning');
         }
     }
     
@@ -678,59 +714,75 @@ class TeleprompterDisplay {
     bindKeyboardShortcuts() {
         var self = this;
         
-        var keyHandler = function(e) {
-            if (e.key === 'F11' || e.key === 'f' || e.key === 'F' ||
-                e.keyCode === 122 || e.keyCode === 70) {
-                if (e.preventDefault) e.preventDefault();
+        document.addEventListener('keydown', function(e) {
+            // F11 or F for fullscreen
+            if (e.key === 'F11' || e.key === 'f' || e.key === 'F') {
+                e.preventDefault();
                 self.toggleFullscreen();
             }
             
-            if (e.key === 'Escape' || e.keyCode === 27) {
-                if (document.fullscreenElement || document.webkitFullscreenElement || 
-                    document.mozFullScreenElement || document.msFullscreenElement) {
+            // Escape to exit fullscreen
+            if (e.key === 'Escape') {
+                if (document.fullscreenElement || document.webkitFullscreenElement) {
                     self.exitFullscreen();
                 }
             }
-        };
-        
-        if (document.addEventListener) {
-            document.addEventListener('keydown', keyHandler);
-        } else if (document.attachEvent) {
-            document.attachEvent('onkeydown', keyHandler);
-        }
+            
+            // Arrow keys for manual scroll
+            if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                self.scrollUp(100);
+            }
+            
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                self.scrollDown(100);
+            }
+            
+            // Page Up/Down for paragraph navigation
+            if (e.key === 'PageUp') {
+                e.preventDefault();
+                self.goToPrevParagraph();
+            }
+            
+            if (e.key === 'PageDown') {
+                e.preventDefault();
+                self.goToNextParagraph();
+            }
+            
+            // Home to go to start
+            if (e.key === 'Home') {
+                e.preventDefault();
+                self.setScrollPosition(0);
+            }
+        });
         
         // Handle fullscreen change
-        var fullscreenHandler = function() {
-            if (document.fullscreenElement || document.webkitFullscreenElement || 
-                document.mozFullScreenElement || document.msFullscreenElement) {
-                self.addClass(document.body, 'fullscreen');
+        document.addEventListener('fullscreenchange', function() {
+            if (document.fullscreenElement) {
+                document.body.classList.add('fullscreen');
             } else {
-                self.removeClass(document.body, 'fullscreen');
+                document.body.classList.remove('fullscreen');
             }
-        };
+        });
         
-        if (document.addEventListener) {
-            document.addEventListener('fullscreenchange', fullscreenHandler);
-            document.addEventListener('webkitfullscreenchange', fullscreenHandler);
-            document.addEventListener('mozfullscreenchange', fullscreenHandler);
-            document.addEventListener('MSFullscreenChange', fullscreenHandler);
-        }
+        document.addEventListener('webkitfullscreenchange', function() {
+            if (document.webkitFullscreenElement) {
+                document.body.classList.add('fullscreen');
+            } else {
+                document.body.classList.remove('fullscreen');
+            }
+        });
     }
     
     toggleFullscreen() {
         var elem = document.documentElement;
         
-        if (!document.fullscreenElement && !document.webkitFullscreenElement && 
-            !document.mozFullScreenElement && !document.msFullscreenElement) {
-            
+        if (!document.fullscreenElement && !document.webkitFullscreenElement) {
             if (elem.requestFullscreen) {
                 elem.requestFullscreen();
             } else if (elem.webkitRequestFullscreen) {
                 elem.webkitRequestFullscreen();
-            } else if (elem.mozRequestFullScreen) {
-                elem.mozRequestFullScreen();
-            } else if (elem.msRequestFullscreen) {
-                elem.msRequestFullscreen();
             }
         } else {
             this.exitFullscreen();
@@ -742,63 +794,19 @@ class TeleprompterDisplay {
             document.exitFullscreen();
         } else if (document.webkitExitFullscreen) {
             document.webkitExitFullscreen();
-        } else if (document.mozCancelFullScreen) {
-            document.mozCancelFullScreen();
-        } else if (document.msExitFullscreen) {
-            document.msExitFullscreen();
         }
     }
     
     // ========================================
-    // Utility Methods (for older browser support)
+    // Utility Methods
     // ========================================
     
     padZero(num) {
         return (num < 10 ? '0' : '') + num;
     }
-    
-    addClass(element, className) {
-        if (!element) return;
-        if (element.classList) {
-            element.classList.add(className);
-        } else {
-            var classes = element.className.split(' ');
-            if (classes.indexOf(className) === -1) {
-                element.className += ' ' + className;
-            }
-        }
-    }
-    
-    removeClass(element, className) {
-        if (!element) return;
-        if (element.classList) {
-            element.classList.remove(className);
-        } else {
-            var classes = element.className.split(' ');
-            var newClasses = [];
-            for (var i = 0; i < classes.length; i++) {
-                if (classes[i] !== className) {
-                    newClasses.push(classes[i]);
-                }
-            }
-            element.className = newClasses.join(' ');
-        }
-    }
 }
 
 // Initialize display when page loads
-if (document.addEventListener) {
-    document.addEventListener('DOMContentLoaded', function() {
-        new TeleprompterDisplay();
-    });
-} else if (document.attachEvent) {
-    document.attachEvent('onreadystatechange', function() {
-        if (document.readyState === 'complete') {
-            new TeleprompterDisplay();
-        }
-    });
-} else {
-    window.onload = function() {
-        new TeleprompterDisplay();
-    };
-}
+document.addEventListener('DOMContentLoaded', function() {
+    new TeleprompterDisplay();
+});

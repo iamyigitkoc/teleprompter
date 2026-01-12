@@ -100,7 +100,6 @@ body {
     padding: 20px;
     border-radius: 8px;
     box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-    /* height: fit-content; */
     max-height: 80vh;
     overflow-y: auto;
 }
@@ -215,6 +214,107 @@ body {
     color: #555;
 }
 
+/* Scroll Controls Styles */
+.scroll-controls {
+    background: #f0f7ff;
+    padding: 15px;
+    border-radius: 8px;
+    border-left: 4px solid #3498db;
+}
+
+.scroll-buttons {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 15px;
+    flex-wrap: wrap;
+}
+
+.scroll-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 10px 15px;
+    background: #3498db;
+    border: none;
+    border-radius: 6px;
+    color: white;
+    cursor: pointer;
+    font-size: 12px;
+    transition: all 0.2s;
+    min-width: 70px;
+}
+
+.scroll-btn:hover {
+    background: #2980b9;
+    transform: translateY(-2px);
+}
+
+.scroll-btn:active {
+    transform: translateY(0);
+    background: #1c5a85;
+}
+
+.scroll-btn .btn-icon {
+    font-size: 18px;
+    margin-bottom: 4px;
+}
+
+.scroll-btn .btn-text {
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.scroll-amount-control {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+
+.scroll-amount-control label {
+    font-size: 13px;
+    margin-bottom: 0;
+    white-space: nowrap;
+}
+
+.scroll-amount-control input[type="range"] {
+    flex: 1;
+    min-width: 100px;
+}
+
+.scroll-amount-control span {
+    font-size: 13px;
+    color: #666;
+    min-width: 50px;
+}
+
+.paragraph-navigator {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.paragraph-navigator label {
+    font-size: 13px;
+    margin-bottom: 0;
+}
+
+.paragraph-navigator select {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 13px;
+    background: white;
+    cursor: pointer;
+}
+
+.paragraph-navigator select:hover {
+    border-color: #3498db;
+}
+
 @media (max-width: 768px) {
     .format-checkboxes {
         grid-template-columns: 1fr;
@@ -222,6 +322,15 @@ body {
     
     .file-options {
         flex-direction: column;
+    }
+    
+    .scroll-buttons {
+        justify-content: center;
+    }
+    
+    .scroll-btn {
+        flex: 1;
+        min-width: 60px;
     }
 }
 

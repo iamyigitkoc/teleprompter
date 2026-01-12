@@ -9,6 +9,7 @@ class TeleprompterController {
         this.segmentDuration = 10 * 60 * 1000;
         this.speed = 150;
         this.fontSize = 48;
+        this.scrollAmount = 150;
         this.timerInterval = null;
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 5;
@@ -59,6 +60,15 @@ class TeleprompterController {
         this.formatParagraphsCheckbox = document.getElementById('format-paragraphs');
         this.formatPunctuationCheckbox = document.getElementById('format-punctuation');
         this.formatNumbersCheckbox = document.getElementById('format-numbers');
+        
+        // Scroll control elements
+        this.scrollUpBtn = document.getElementById('scroll-up-btn');
+        this.scrollDownBtn = document.getElementById('scroll-down-btn');
+        this.prevParagraphBtn = document.getElementById('prev-paragraph-btn');
+        this.nextParagraphBtn = document.getElementById('next-paragraph-btn');
+        this.scrollAmountControl = document.getElementById('scroll-amount');
+        this.scrollAmountDisplay = document.getElementById('scroll-amount-display');
+        this.paragraphSelect = document.getElementById('paragraph-select');
     }
     
     bindEvents() {
@@ -79,6 +89,17 @@ class TeleprompterController {
         this.copyUrlBtn.addEventListener('click', () => this.copyDisplayUrl());
         this.formatBtn.addEventListener('click', () => this.formatTextForTeleprompter());
         
+        // Scroll control events
+        this.scrollUpBtn.addEventListener('click', () => this.scrollUp());
+        this.scrollDownBtn.addEventListener('click', () => this.scrollDown());
+        this.prevParagraphBtn.addEventListener('click', () => this.prevParagraph());
+        this.nextParagraphBtn.addEventListener('click', () => this.nextParagraph());
+        this.scrollAmountControl.addEventListener('input', (e) => this.updateScrollAmount(e.target.value));
+        this.paragraphSelect.addEventListener('change', (e) => this.goToParagraph(e.target.value));
+        
+        // Keyboard shortcuts for scroll control
+        document.addEventListener('keydown', (e) => this.handleKeyboardShortcuts(e));
+        
         // Initially show formatting options
         this.formattingOptions.style.display = 'block';
         
@@ -86,6 +107,7 @@ class TeleprompterController {
         this.textPreview.addEventListener('input', () => {
             this.sendTextUpdate();
             this.updateDurationCalculations();
+            this.updateParagraphSelect();
         });
         
         // Prevent form submission on enter
@@ -97,10 +119,111 @@ class TeleprompterController {
         });
     }
     
+    // ========================================
+    // Scroll Control Methods
+    // ========================================
+    
+    scrollUp() {
+        this.sendMessage({ type: 'scrollUp', pixels: this.scrollAmount });
+    }
+    
+    scrollDown() {
+        this.sendMessage({ type: 'scrollDown', pixels: this.scrollAmount });
+    }
+    
+    prevParagraph() {
+        this.sendMessage({ type: 'prevParagraph' });
+    }
+    
+    nextParagraph() {
+        this.sendMessage({ type: 'nextParagraph' });
+    }
+    
+    goToParagraph(index) {
+        if (index !== '' && index !== null) {
+            this.sendMessage({ type: 'goToParagraph', index: parseInt(index) });
+        }
+    }
+    
+    updateScrollAmount(value) {
+        this.scrollAmount = parseInt(value);
+        this.scrollAmountDisplay.textContent = this.scrollAmount + 'px';
+    }
+    
+    updateParagraphSelect() {
+        const paragraphs = this.textPreview.querySelectorAll('p');
+        this.paragraphSelect.innerHTML = '<option value="">-- Select Paragraph --</option>';
+        
+        paragraphs.forEach((p, index) => {
+            const option = document.createElement('option');
+            option.value = index;
+            // Get first 50 chars of paragraph text for preview
+            const text = p.textContent || p.innerText || '';
+            const preview = text.substring(0, 50) + (text.length > 50 ? '...' : '');
+            option.textContent = `${index + 1}. ${preview}`;
+            this.paragraphSelect.appendChild(option);
+        });
+    }
+    
+    handleKeyboardShortcuts(e) {
+        // Only handle shortcuts when not focused on input/textarea
+        const activeElement = document.activeElement;
+        const isEditing = activeElement.tagName === 'INPUT' || 
+                          activeElement.tagName === 'TEXTAREA' || 
+                          activeElement.isContentEditable;
+        
+        if (isEditing && activeElement !== this.textPreview) {
+            return;
+        }
+        
+        // Arrow Up - Scroll Up
+        if (e.key === 'ArrowUp' && !isEditing) {
+            e.preventDefault();
+            this.scrollUp();
+        }
+        
+        // Arrow Down - Scroll Down
+        if (e.key === 'ArrowDown' && !isEditing) {
+            e.preventDefault();
+            this.scrollDown();
+        }
+        
+        // Page Up - Previous Paragraph
+        if (e.key === 'PageUp') {
+            e.preventDefault();
+            this.prevParagraph();
+        }
+        
+        // Page Down - Next Paragraph
+        if (e.key === 'PageDown') {
+            e.preventDefault();
+            this.nextParagraph();
+        }
+        
+        // Home - Go to start
+        if (e.key === 'Home' && e.ctrlKey) {
+            e.preventDefault();
+            this.sendMessage({ type: 'setScrollPosition', position: 0 });
+        }
+        
+        // Space - Toggle play/pause (when not editing)
+        if (e.key === ' ' && !isEditing) {
+            e.preventDefault();
+            if (this.isPlaying) {
+                this.pause();
+            } else {
+                this.start();
+            }
+        }
+    }
+    
+    // ========================================
+    // WebSocket Connection
+    // ========================================
+    
     connectWebSocket() {
         try {
             this.updateConnectionStatus('connecting', 'Connecting...');
-            // Construct WebSocket URL dynamically based on current location
             const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsPort = window.location.port || (window.location.protocol === 'https:' ? 443 : 80);
             const wsUrl = `${wsProtocol}//${window.location.hostname}:${wsPort}`;
@@ -111,13 +234,11 @@ class TeleprompterController {
                 this.updateConnectionStatus('connected', 'Connected');
                 this.reconnectAttempts = 0;
                 
-                // Register as controller
                 this.ws.send(JSON.stringify({
                     type: 'register',
                     role: 'controller'
                 }));
                 
-                // Send initial state
                 this.sendInitialState();
             };
             
@@ -170,48 +291,44 @@ class TeleprompterController {
     }
     
     sendInitialState() {
-        // Send current text content
         this.sendTextUpdate();
-        
-        // Send all current settings
         this.sendMessage({ type: 'setSpeed', value: this.speed });
         this.sendMessage({ type: 'setFontSize', value: this.fontSize });
-        this.updateSegmentLength(); // This will send the segment length
+        this.updateSegmentLength();
         this.sendMessage({ type: 'setMirrorMode', enabled: this.mirrorModeCheckbox.checked });
         this.sendMessage({ type: 'setHideTimer', enabled: this.hideTimerCheckbox.checked });
         this.sendMessage({ type: 'setOnAir', enabled: this.onAirModeCheckbox.checked });
         
-        // Send scheduled start if set
         if (this.scheduledStartInput.value) {
             this.updateScheduledStart();
         }
+        
+        // Update paragraph select on initial load
+        this.updateParagraphSelect();
     }
     
     handleMessage(data) {
         switch (data.type) {
             case 'stateSync':
-                // Server is syncing state - we're already the source of truth
                 break;
-                
             case 'pong':
-                // Heartbeat response
                 break;
-                
             case 'connectionCount':
                 this.updateConnectionInfo(data);
                 break;
-                
             default:
                 console.log('Unknown message type:', data.type);
         }
     }
     
     updateConnectionInfo(data) {
-        // Update connection status display with count info
-        const totalConnections = data.controllers + data.displays;
         const displayText = `Connected (${data.displays} display${data.displays !== 1 ? 's' : ''})`;
         this.updateConnectionStatus('connected', displayText);
     }
+    
+    // ========================================
+    // File Handling
+    // ========================================
     
     async handleFileUpload(event) {
         const file = event.target.files[0];
@@ -275,7 +392,6 @@ class TeleprompterController {
     }
     
     setPrompterText(text) {
-        // Auto-format if enabled
         if (this.autoFormatCheckbox.checked) {
             text = this.formatTextForTeleprompterStandards(text);
         }
@@ -284,6 +400,7 @@ class TeleprompterController {
         this.textPreview.innerHTML = paragraphs.map(p => `<p>${p.trim()}</p>`).join('');
         this.sendTextUpdate();
         this.updateDurationCalculations();
+        this.updateParagraphSelect();
     }
     
     sendTextUpdate() {
@@ -296,7 +413,12 @@ class TeleprompterController {
         this.sendTextUpdate();
         this.reset();
         this.updateDurationCalculations();
+        this.updateParagraphSelect();
     }
+    
+    // ========================================
+    // Settings Updates
+    // ========================================
     
     updateSpeed(value) {
         this.speed = parseInt(value);
@@ -309,10 +431,8 @@ class TeleprompterController {
         const minutes = parseInt(this.segmentMinutesInput.value) || 0;
         const seconds = parseInt(this.segmentSecondsInput.value) || 0;
         
-        // Convert to milliseconds
         this.segmentDuration = (minutes * 60 + seconds) * 1000;
         
-        // Send total seconds to server
         this.sendMessage({ 
             type: 'setSegmentLength', 
             minutes: minutes,
@@ -370,6 +490,10 @@ class TeleprompterController {
         this.sendMessage({ type: 'clearScheduledStart' });
     }
     
+    // ========================================
+    // Playback Controls
+    // ========================================
+    
     start() {
         if (this.isPaused) {
             this.resume();
@@ -380,7 +504,6 @@ class TeleprompterController {
         this.isPaused = false;
         this.startTime = Date.now() - (this.pausedTime || 0);
         
-        // Auto-enable on air indicator
         this.onAirModeCheckbox.checked = true;
         
         this.startBtn.disabled = true;
@@ -449,7 +572,6 @@ class TeleprompterController {
         this.updateCountdownDisplay(remaining);
         this.updateElapsedDisplay(elapsed);
         
-        // Auto-pause when segment time is reached
         if (remaining <= 0 && this.isPlaying) {
             this.pause();
             alert('Segment time completed!');
@@ -470,6 +592,10 @@ class TeleprompterController {
         this.elapsedTimer.textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
     }
     
+    // ========================================
+    // Duration Calculations
+    // ========================================
+    
     updateDurationCalculations() {
         const wordCount = this.getWordCount();
         const expectedDurationMs = this.calculateExpectedDuration(wordCount);
@@ -478,11 +604,9 @@ class TeleprompterController {
         this.wordCount.textContent = wordCount.toLocaleString();
         this.expectedDuration.textContent = this.formatDuration(expectedDurationMs);
         
-        // Calculate and display difference
         const differenceMs = segmentDurationMs - expectedDurationMs;
         this.diffValue.textContent = this.formatDurationDiff(differenceMs);
         
-        // Update styling based on difference
         this.durationDiff.classList.remove('positive', 'negative', 'neutral');
         if (Math.abs(differenceMs) < 30000) {
             this.durationDiff.classList.add('neutral');
@@ -520,6 +644,10 @@ class TeleprompterController {
         return `${sign}${minutes}:${seconds.toString().padStart(2, '0')}`;
     }
     
+    // ========================================
+    // UI Updates
+    // ========================================
+    
     updateConnectionStatus(status, text) {
         this.statusIndicator.className = `status-indicator ${status}`;
         this.statusText.textContent = text;
@@ -545,7 +673,6 @@ class TeleprompterController {
                 this.copyUrlBtn.textContent = 'Copy';
             }, 2000);
         }).catch(() => {
-            // Fallback for browsers that don't support clipboard API
             const textArea = document.createElement('textarea');
             textArea.value = displayUrl;
             document.body.appendChild(textArea);
@@ -559,6 +686,10 @@ class TeleprompterController {
             }, 2000);
         });
     }
+    
+    // ========================================
+    // Text Formatting
+    // ========================================
     
     formatTextForTeleprompter() {
         const currentText = this.textPreview.textContent || this.textPreview.innerText || '';
@@ -576,12 +707,12 @@ class TeleprompterController {
         this.textPreview.innerHTML = paragraphs.map(p => `<p>${p.trim()}</p>`).join('');
         this.sendTextUpdate();
         this.updateDurationCalculations();
+        this.updateParagraphSelect();
     }
     
     formatTextForTeleprompterStandards(text) {
         let formattedText = text;
         
-        // Apply selected formatting options
         if (this.formatCapsCheckbox.checked) {
             formattedText = this.convertToUppercase(formattedText);
         }
@@ -620,7 +751,6 @@ class TeleprompterController {
             '80': 'EIGHTY', '90': 'NINETY', '100': 'ONE HUNDRED'
         };
         
-        // Convert simple numbers (0-100) to words
         return text.replace(/\b(\d{1,3})\b/g, (match, number) => {
             const num = parseInt(number);
             if (numberWords[num]) {
@@ -632,43 +762,39 @@ class TeleprompterController {
                     return `${numberWords[tens]}-${numberWords[ones]}`;
                 }
             }
-            return match; // Return original if not found
+            return match;
         });
     }
     
     enhancePunctuationPauses(text) {
-        // Add extra spaces for natural pauses
         return text
-            .replace(/\./g, '. ')  // Period pause
-            .replace(/,/g, ', ')   // Comma pause
-            .replace(/;/g, '; ')   // Semicolon pause
-            .replace(/:/g, ': ')   // Colon pause
-            .replace(/\?/g, '? ')  // Question pause
-            .replace(/!/g, '! ')   // Exclamation pause
-            .replace(/\s+/g, ' ')  // Clean up multiple spaces
+            .replace(/\./g, '. ')
+            .replace(/,/g, ', ')
+            .replace(/;/g, '; ')
+            .replace(/:/g, ': ')
+            .replace(/\?/g, '? ')
+            .replace(/!/g, '! ')
+            .replace(/\s+/g, ' ')
             .trim();
     }
     
     formatSentenceBreaks(text) {
-        // Put each sentence on its own line
         return text
-            .replace(/([.!?])\s+/g, '$1\n\n')  // Line break after sentence-ending punctuation
-            .replace(/\n\n+/g, '\n\n')         // Clean up multiple line breaks
+            .replace(/([.!?])\s+/g, '$1\n\n')
+            .replace(/\n\n+/g, '\n\n')
             .trim();
     }
     
     addParagraphBreaks(text) {
-        // Ensure proper paragraph spacing for teleprompter readability
         const sentences = text.split(/\n\n/);
         const groupedSentences = [];
         
-        // Group sentences into logical paragraphs (3-4 sentences max)
         for (let i = 0; i < sentences.length; i += 3) {
             const paragraph = sentences.slice(i, i + 3).join('\n\n');
             groupedSentences.push(paragraph);
         }
         
-        return groupedSentences.join('\n\n\n'); // Extra space between paragraphs
+        return groupedSentences.join('\n\n\n');
     }
 }
 

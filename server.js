@@ -39,7 +39,7 @@ function queueEventForClient(clientId, data) {
     
     const queue = eventQueues.get(clientId) || [];
     queue.push(event);
-
+    
     if (queue.length > 100) {
         queue.shift();
     }
