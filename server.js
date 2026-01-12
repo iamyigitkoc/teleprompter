@@ -5,11 +5,380 @@ const fs = require('fs');
 
 const PORT = process.env.PORT || 8080;
 
-// Create HTTP server for serving static files
-const server = http.createServer((req, res) => {
-    let filePath = path.join(__dirname, req.url === '/' ? 'controller.html' : req.url);
+// Current state to sync new connections
+let currentState = {
+    text: '',
+    speed: 150,
+    fontSize: 48,
+    segmentLength: 10 * 60,
+    segmentMinutes: 10,
+    segmentSeconds: 0,
+    isPlaying: false,
+    isPaused: false,
+    currentPosition: 0,
+    startTime: null,
+    pausedTime: 0,
+    mirrorMode: false,
+    hideTimer: false,
+    onAir: false,
+    scheduledStartTime: null
+};
+
+// Polling Support for Legacy Devices
+const pollingClients = new Map();
+const eventQueues = new Map();
+let eventIdCounter = 0;
+
+function queueEventForClient(clientId, data) {
+    eventIdCounter++;
+    const event = {
+        id: eventIdCounter,
+        data: data,
+        timestamp: Date.now()
+    };
     
-    // Security check - prevent directory traversal
+    const queue = eventQueues.get(clientId) || [];
+    queue.push(event);
+
+    if (queue.length > 100) {
+        queue.shift();
+    }
+    
+    eventQueues.set(clientId, queue);
+}
+
+function broadcastToPollingDisplays(data) {
+    pollingClients.forEach((client, clientId) => {
+        if (client.role === 'display') {
+            queueEventForClient(clientId, data);
+        }
+    });
+}
+
+function broadcastToPollingControllers(data) {
+    pollingClients.forEach((client, clientId) => {
+        if (client.role === 'controller') {
+            queueEventForClient(clientId, data);
+        }
+    });
+}
+
+function cleanupStalePollingClients() {
+    const staleThreshold = 60000;
+    const now = Date.now();
+    
+    pollingClients.forEach((client, clientId) => {
+        if (now - client.lastPoll > staleThreshold) {
+            pollingClients.delete(clientId);
+            eventQueues.delete(clientId);
+            console.log('Removed stale polling client:', clientId);
+            broadcastConnectionCount();
+        }
+    });
+}
+
+setInterval(cleanupStalePollingClients, 30000);
+
+function parseJSONBody(req) {
+    return new Promise((resolve, reject) => {
+        let body = '';
+        req.on('data', chunk => {
+            body += chunk.toString();
+            if (body.length > 1048576) {
+                reject(new Error('Body too large'));
+            }
+        });
+        req.on('end', () => {
+            try {
+                resolve(body ? JSON.parse(body) : {});
+            } catch (e) {
+                reject(e);
+            }
+        });
+        req.on('error', reject);
+    });
+}
+
+function parseQuery(url) {
+    const queryIndex = url.indexOf('?');
+    if (queryIndex === -1) return {};
+    
+    const queryString = url.slice(queryIndex + 1);
+    const params = {};
+    
+    queryString.split('&').forEach(pair => {
+        const [key, value] = pair.split('=');
+        params[decodeURIComponent(key)] = decodeURIComponent(value || '');
+    });
+    
+    return params;
+}
+
+function handlePollingAPI(req, res, urlPath) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    
+    if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return true;
+    }
+    
+    if (urlPath === '/api/state' && req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(currentState), 'utf-8');
+        return true;
+    }
+    
+    if (urlPath === '/api/register' && req.method === 'POST') {
+        parseJSONBody(req)
+            .then(data => {
+                const { role, clientId } = data;
+                
+                if (!clientId || !role) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Missing clientId or role' }));
+                    return;
+                }
+                
+                pollingClients.set(clientId, {
+                    role: role,
+                    registeredAt: Date.now(),
+                    lastPoll: Date.now()
+                });
+                
+                eventQueues.set(clientId, []);
+                
+                queueEventForClient(clientId, {
+                    type: 'stateSync',
+                    state: currentState
+                });
+                
+                console.log(`Polling ${role} registered: ${clientId}`);
+                broadcastConnectionCount();
+                
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true, clientId: clientId }));
+            })
+            .catch(err => {
+                console.error('Register error:', err);
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Invalid request' }));
+            });
+        return true;
+    }
+    
+    if (urlPath.startsWith('/api/poll') && req.method === 'GET') {
+        const query = parseQuery(req.url);
+        const clientId = query.clientId;
+        const lastEventId = parseInt(query.lastEventId) || 0;
+        
+        if (!clientId || !pollingClients.has(clientId)) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Client not registered' }));
+            return true;
+        }
+        
+        const client = pollingClients.get(clientId);
+        client.lastPoll = Date.now();
+        
+        const clientEvents = eventQueues.get(clientId) || [];
+        const newEvents = clientEvents.filter(e => e.id > lastEventId);
+        
+        eventQueues.set(clientId, clientEvents.filter(e => e.id > lastEventId));
+        
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            events: newEvents,
+            timestamp: Date.now()
+        }));
+        return true;
+    }
+    
+    if (urlPath === '/api/send' && req.method === 'POST') {
+        parseJSONBody(req)
+            .then(data => {
+                const { clientId, message } = data;
+                
+                if (!clientId || !pollingClients.has(clientId)) {
+                    res.writeHead(401, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Client not registered' }));
+                    return;
+                }
+                
+                const client = pollingClients.get(clientId);
+                client.lastPoll = Date.now();
+                
+                handleClientMessage(message, client.role);
+                
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true }));
+            })
+            .catch(err => {
+                console.error('Send error:', err);
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Invalid request' }));
+            });
+        return true;
+    }
+    
+    if (urlPath === '/api/unregister' && req.method === 'POST') {
+        parseJSONBody(req)
+            .then(data => {
+                const { clientId } = data;
+                
+                if (clientId && pollingClients.has(clientId)) {
+                    pollingClients.delete(clientId);
+                    eventQueues.delete(clientId);
+                    console.log('Polling client unregistered:', clientId);
+                    broadcastConnectionCount();
+                }
+                
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true }));
+            })
+            .catch(err => {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Invalid request' }));
+            });
+        return true;
+    }
+    
+    return false;
+}
+
+function handleClientMessage(data, role) {
+    switch (data.type) {
+        case 'setText':
+            currentState.text = data.content;
+            broadcastToDisplays({ type: 'setText', content: data.content });
+            break;
+            
+        case 'setSpeed':
+            currentState.speed = data.value;
+            broadcastToDisplays({ type: 'setSpeed', value: data.value });
+            break;
+            
+        case 'setFontSize':
+            currentState.fontSize = data.value;
+            broadcastToDisplays({ type: 'setFontSize', value: data.value });
+            break;
+            
+        case 'setSegmentLength':
+            currentState.segmentLength = data.totalSeconds || data.value || 10 * 60;
+            currentState.segmentMinutes = data.minutes || Math.floor(currentState.segmentLength / 60);
+            currentState.segmentSeconds = data.seconds || (currentState.segmentLength % 60);
+            broadcastToDisplays({ 
+                type: 'setSegmentLength', 
+                totalSeconds: currentState.segmentLength,
+                minutes: currentState.segmentMinutes,
+                seconds: currentState.segmentSeconds
+            });
+            break;
+            
+        case 'setMirrorMode':
+            currentState.mirrorMode = data.enabled;
+            broadcastToDisplays({ type: 'setMirrorMode', enabled: data.enabled });
+            break;
+            
+        case 'setHideTimer':
+            currentState.hideTimer = data.enabled;
+            broadcastToDisplays({ type: 'setHideTimer', enabled: data.enabled });
+            break;
+            
+        case 'setOnAir':
+            currentState.onAir = data.enabled;
+            broadcastToDisplays({ type: 'setOnAir', enabled: data.enabled });
+            break;
+            
+        case 'setScheduledStart':
+            currentState.scheduledStartTime = data.scheduledTime;
+            broadcastToDisplays({ type: 'setScheduledStart', scheduledTime: data.scheduledTime });
+            break;
+            
+        case 'clearScheduledStart':
+            currentState.scheduledStartTime = null;
+            broadcastToDisplays({ type: 'clearScheduledStart' });
+            break;
+            
+        case 'start':
+            currentState.isPlaying = true;
+            currentState.isPaused = false;
+            currentState.onAir = true;
+            currentState.scheduledStartTime = null;
+            currentState.startTime = Date.now() - (currentState.pausedTime || 0);
+            broadcastToDisplays({ 
+                type: 'start', 
+                startTime: currentState.startTime,
+                pausedTime: currentState.pausedTime
+            });
+            broadcastToDisplays({ type: 'setOnAir', enabled: true });
+            broadcastToDisplays({ type: 'clearScheduledStart' });
+            break;
+            
+        case 'pause':
+            currentState.isPlaying = false;
+            currentState.isPaused = true;
+            currentState.pausedTime = Date.now() - currentState.startTime;
+            broadcastToDisplays({ 
+                type: 'pause',
+                pausedTime: currentState.pausedTime
+            });
+            break;
+            
+        case 'reset':
+            currentState.isPlaying = false;
+            currentState.isPaused = false;
+            currentState.currentPosition = 0;
+            currentState.startTime = null;
+            currentState.pausedTime = 0;
+            broadcastToDisplays({ type: 'reset' });
+            break;
+        
+        // Scroll Control Messages
+        case 'scrollUp':
+            broadcastToDisplays({ type: 'scrollUp', pixels: data.pixels || 100 });
+            break;
+            
+        case 'scrollDown':
+            broadcastToDisplays({ type: 'scrollDown', pixels: data.pixels || 100 });
+            break;
+            
+        case 'nextParagraph':
+            broadcastToDisplays({ type: 'nextParagraph' });
+            break;
+            
+        case 'prevParagraph':
+            broadcastToDisplays({ type: 'prevParagraph' });
+            break;
+            
+        case 'goToParagraph':
+            broadcastToDisplays({ type: 'goToParagraph', index: data.index || 0 });
+            break;
+            
+        case 'setScrollPosition':
+            currentState.currentPosition = data.position || 0;
+            broadcastToDisplays({ type: 'setScrollPosition', position: data.position || 0 });
+            break;
+            
+        default:
+            console.log('Unknown message type:', data.type);
+    }
+}
+
+// HTTP Server
+const server = http.createServer((req, res) => {
+    const urlPath = req.url.split('?')[0];
+    
+    if (urlPath.startsWith('/api/')) {
+        if (handlePollingAPI(req, res, urlPath)) {
+            return;
+        }
+    }
+    
+    let filePath = path.join(__dirname, req.url === '/' ? 'controller.html' : urlPath);
+    
     if (!filePath.startsWith(__dirname)) {
         res.writeHead(403);
         res.end('Forbidden');
@@ -25,14 +394,7 @@ const server = http.createServer((req, res) => {
         '.png': 'image/png',
         '.jpg': 'image/jpg',
         '.gif': 'image/gif',
-        '.svg': 'image/svg+xml',
-        '.wav': 'audio/wav',
-        '.mp4': 'video/mp4',
-        '.woff': 'application/font-woff',
-        '.ttf': 'application/font-ttf',
-        '.eot': 'application/vnd.ms-fontobject',
-        '.otf': 'application/font-otf',
-        '.wasm': 'application/wasm'
+        '.svg': 'image/svg+xml'
     };
     
     const contentType = mimeTypes[extname] || 'application/octet-stream';
@@ -53,32 +415,12 @@ const server = http.createServer((req, res) => {
     });
 });
 
-// Create WebSocket server using the same HTTP server
+// WebSocket Server
 const wss = new WebSocket.Server({ server });
 
-// Store connected clients
 const clients = {
     controllers: new Set(),
     displays: new Set()
-};
-
-// Current state to sync new connections
-let currentState = {
-    text: '',
-    speed: 150,
-    fontSize: 48,
-    segmentLength: 10 * 60, // 10 minutes in seconds
-    segmentMinutes: 10,
-    segmentSeconds: 0,
-    isPlaying: false,
-    isPaused: false,
-    currentPosition: 0,
-    startTime: null,
-    pausedTime: 0,
-    mirrorMode: false,
-    hideTimer: false,
-    onAir: false,
-    scheduledStartTime: null
 };
 
 wss.on('connection', (ws, req) => {
@@ -88,105 +430,12 @@ wss.on('connection', (ws, req) => {
         try {
             const data = JSON.parse(message.toString());
             
-            switch (data.type) {
-                case 'register':
-                    handleRegistration(ws, data);
-                    break;
-                    
-                case 'setText':
-                    currentState.text = data.content;
-                    broadcastToDisplays({ type: 'setText', content: data.content });
-                    break;
-                    
-                case 'setSpeed':
-                    currentState.speed = data.value;
-                    broadcastToDisplays({ type: 'setSpeed', value: data.value });
-                    break;
-                    
-                case 'setFontSize':
-                    currentState.fontSize = data.value;
-                    broadcastToDisplays({ type: 'setFontSize', value: data.value });
-                    break;
-                    
-                case 'setSegmentLength':
-                    currentState.segmentLength = data.totalSeconds || data.value || 10 * 60; // fallback to 10 minutes
-                    currentState.segmentMinutes = data.minutes || Math.floor(currentState.segmentLength / 60);
-                    currentState.segmentSeconds = data.seconds || (currentState.segmentLength % 60);
-                    broadcastToDisplays({ 
-                        type: 'setSegmentLength', 
-                        totalSeconds: currentState.segmentLength,
-                        minutes: currentState.segmentMinutes,
-                        seconds: currentState.segmentSeconds
-                    });
-                    break;
-                    
-                case 'setMirrorMode':
-                    currentState.mirrorMode = data.enabled;
-                    broadcastToDisplays({ type: 'setMirrorMode', enabled: data.enabled });
-                    break;
-                    
-                case 'setHideTimer':
-                    currentState.hideTimer = data.enabled;
-                    broadcastToDisplays({ type: 'setHideTimer', enabled: data.enabled });
-                    break;
-                    
-                case 'setOnAir':
-                    currentState.onAir = data.enabled;
-                    broadcastToDisplays({ type: 'setOnAir', enabled: data.enabled });
-                    break;
-                    
-                case 'setScheduledStart':
-                    currentState.scheduledStartTime = data.scheduledTime;
-                    broadcastToDisplays({ type: 'setScheduledStart', scheduledTime: data.scheduledTime });
-                    break;
-                    
-                case 'clearScheduledStart':
-                    currentState.scheduledStartTime = null;
-                    broadcastToDisplays({ type: 'clearScheduledStart' });
-                    break;
-                    
-                case 'start':
-                    currentState.isPlaying = true;
-                    currentState.isPaused = false;
-                    currentState.onAir = true; // Automatically turn on air indicator
-                    currentState.scheduledStartTime = null; // Clear scheduled start
-                    currentState.startTime = Date.now() - (currentState.pausedTime || 0);
-                    broadcastToDisplays({ 
-                        type: 'start', 
-                        startTime: currentState.startTime,
-                        pausedTime: currentState.pausedTime
-                    });
-                    // Send on air update to displays
-                    broadcastToDisplays({ type: 'setOnAir', enabled: true });
-                    // Clear scheduled start on displays
-                    broadcastToDisplays({ type: 'clearScheduledStart' });
-                    break;
-                    
-                case 'pause':
-                    currentState.isPlaying = false;
-                    currentState.isPaused = true;
-                    currentState.pausedTime = Date.now() - currentState.startTime;
-                    broadcastToDisplays({ 
-                        type: 'pause',
-                        pausedTime: currentState.pausedTime
-                    });
-                    break;
-                    
-                case 'reset':
-                    currentState.isPlaying = false;
-                    currentState.isPaused = false;
-                    currentState.currentPosition = 0;
-                    currentState.startTime = null;
-                    currentState.pausedTime = 0;
-                    broadcastToDisplays({ type: 'reset' });
-                    break;
-                    
-                case 'ping':
-                    ws.send(JSON.stringify({ type: 'pong' }));
-                    break;
-                    
-                default:
-                    console.log('Unknown message type:', data.type);
+            if (data.type === 'register') {
+                handleRegistration(ws, data);
+            } else if (data.type === 'ping') {
+                ws.send(JSON.stringify({ type: 'pong' }));
+            } else {
+                handleClientMessage(data, ws.role);
             }
         } catch (error) {
             console.error('Error parsing message:', error);
@@ -206,25 +455,16 @@ wss.on('connection', (ws, req) => {
 });
 
 function handleRegistration(ws, data) {
+    ws.role = data.role;
+    
     if (data.role === 'controller') {
         clients.controllers.add(ws);
-        console.log('Controller registered');
-        
-        // Send current state to new controller
-        ws.send(JSON.stringify({
-            type: 'stateSync',
-            state: currentState
-        }));
-        
+        console.log('WebSocket Controller registered');
+        ws.send(JSON.stringify({ type: 'stateSync', state: currentState }));
     } else if (data.role === 'display') {
         clients.displays.add(ws);
-        console.log('Display registered');
-        
-        // Send current state to new display
-        ws.send(JSON.stringify({
-            type: 'stateSync',
-            state: currentState
-        }));
+        console.log('WebSocket Display registered');
+        ws.send(JSON.stringify({ type: 'stateSync', state: currentState }));
     }
     
     broadcastConnectionCount();
@@ -232,50 +472,66 @@ function handleRegistration(ws, data) {
 
 function broadcastToDisplays(message) {
     const messageStr = JSON.stringify(message);
+    
     clients.displays.forEach(client => {
         if (client.readyState === WebSocket.OPEN) {
             client.send(messageStr);
         }
     });
+    
+    broadcastToPollingDisplays(message);
 }
 
 function broadcastToControllers(message) {
     const messageStr = JSON.stringify(message);
+    
     clients.controllers.forEach(client => {
         if (client.readyState === WebSocket.OPEN) {
             client.send(messageStr);
         }
     });
+    
+    broadcastToPollingControllers(message);
 }
 
 function broadcastConnectionCount() {
+    let controllerCount = clients.controllers.size;
+    let displayCount = clients.displays.size;
+    
+    pollingClients.forEach(client => {
+        if (client.role === 'controller') controllerCount++;
+        if (client.role === 'display') displayCount++;
+    });
+    
     const connectionInfo = {
         type: 'connectionCount',
-        controllers: clients.controllers.size,
-        displays: clients.displays.size
+        controllers: controllerCount,
+        displays: displayCount
     };
     
+    const messageStr = JSON.stringify(connectionInfo);
     [...clients.controllers, ...clients.displays].forEach(client => {
         if (client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify(connectionInfo));
+            client.send(messageStr);
         }
+    });
+    
+    pollingClients.forEach((client, clientId) => {
+        queueEventForClient(clientId, connectionInfo);
     });
 }
 
-// Start HTTP server
 server.listen(PORT, () => {
-    console.log(`HTTP Server running at http://localhost:${PORT}`);
-    console.log(`WebSocket Server running on the same port ${PORT}`);
+    console.log(`Server running at http://localhost:${PORT}`);
     console.log(`Controller: http://localhost:${PORT}/controller.html`);
     console.log(`Display: http://localhost:${PORT}/display.html`);
+    console.log(`Legacy Display: http://localhost:${PORT}/display_legacy.html`);
 });
 
-// Graceful shutdown
 process.on('SIGINT', () => {
-    console.log('Shutting down servers...');
+    console.log('Shutting down...');
     wss.close(() => {
         server.close(() => {
-            console.log('Servers closed');
             process.exit(0);
         });
     });

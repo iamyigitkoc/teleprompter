@@ -1,6 +1,6 @@
 class TeleprompterDisplay {
     constructor() {
-        this.ws = null;
+        this.connection = null;
         this.isPlaying = false;
         this.isPaused = false;
         this.currentPosition = 0;
@@ -17,12 +17,24 @@ class TeleprompterDisplay {
         this.maxReconnectAttempts = 5;
         this.reconnectDelay = 1000;
         
+        // Connection type tracking
+        this.connectionType = null; // 'websocket' or 'polling'
+        this.pollingInterval = null;
+        this.pollDelay = 1000; // Poll every 1 second
+        this.clientId = this.generateClientId();
+        this.lastEventId = 0;
+        
         this.initializeElements();
-        this.connectWebSocket();
+        this.connect();
         this.bindKeyboardShortcuts();
         
         // Auto-reconnect on connection loss
         this.setupReconnection();
+    }
+    
+    generateClientId() {
+        // Generate a unique client ID for polling sessions
+        return 'display_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
     }
     
     initializeElements() {
@@ -38,28 +50,56 @@ class TeleprompterDisplay {
         this.countdownTarget = document.getElementById('countdown-target');
     }
     
+    // ========================================
+    // Connection Management
+    // ========================================
+    
+    connect() {
+        // Check if WebSocket is supported
+        if (this.supportsWebSocket()) {
+            this.connectWebSocket();
+        } else {
+            console.log('WebSocket not supported, falling back to long polling');
+            this.connectPolling();
+        }
+    }
+    
+    supportsWebSocket() {
+        try {
+            return 'WebSocket' in window && window.WebSocket !== undefined;
+        } catch (e) {
+            return false;
+        }
+    }
+    
+    // ========================================
+    // WebSocket Connection
+    // ========================================
+    
     connectWebSocket() {
         try {
-            this.updateConnectionStatus('connecting', 'Connecting...');
-            // Construct WebSocket URL dynamically based on current location
+            this.updateConnectionStatus('connecting', 'Connecting (WebSocket)...');
+            this.connectionType = 'websocket';
+            
             const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsPort = window.location.port || (window.location.protocol === 'https:' ? 443 : 80);
             const wsUrl = `${wsProtocol}//${window.location.hostname}:${wsPort}`;
-            this.ws = new WebSocket(wsUrl);
             
-            this.ws.onopen = () => {
-                console.log('Connected to WebSocket server');
-                this.updateConnectionStatus('connected', 'Connected');
+            this.connection = new WebSocket(wsUrl);
+            
+            this.connection.onopen = () => {
+                console.log('Connected via WebSocket');
+                this.updateConnectionStatus('connected', 'Connected (WS)');
                 this.reconnectAttempts = 0;
                 
-                // Register as display
-                this.ws.send(JSON.stringify({
+                this.connection.send(JSON.stringify({
                     type: 'register',
-                    role: 'display'
+                    role: 'display',
+                    clientId: this.clientId
                 }));
             };
             
-            this.ws.onmessage = (event) => {
+            this.connection.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data);
                     this.handleMessage(data);
@@ -68,33 +108,186 @@ class TeleprompterDisplay {
                 }
             };
             
-            this.ws.onclose = () => {
+            this.connection.onclose = () => {
                 console.log('WebSocket connection closed');
                 this.updateConnectionStatus('disconnected', 'Disconnected');
                 this.scheduleReconnect();
             };
             
-            this.ws.onerror = (error) => {
+            this.connection.onerror = (error) => {
                 console.error('WebSocket error:', error);
+                // On WebSocket error, try falling back to polling
+                if (this.reconnectAttempts >= 2) {
+                    console.log('Multiple WebSocket failures, trying polling fallback');
+                    this.connectionType = null;
+                    this.connectPolling();
+                    return;
+                }
                 this.updateConnectionStatus('disconnected', 'Connection Error');
             };
             
         } catch (error) {
-            console.error('Failed to connect to WebSocket:', error);
-            this.updateConnectionStatus('disconnected', 'Failed to Connect');
-            this.scheduleReconnect();
+            console.error('Failed to connect via WebSocket:', error);
+            this.updateConnectionStatus('disconnected', 'WebSocket Failed');
+            // Fall back to polling
+            this.connectPolling();
         }
     }
+    
+    // ========================================
+    // Long Polling Connection (Fallback)
+    // ========================================
+    
+    connectPolling() {
+        this.connectionType = 'polling';
+        this.updateConnectionStatus('connecting', 'Connecting (Polling)...');
+        
+        // Register with server via HTTP
+        this.registerPolling()
+            .then(() => {
+                this.updateConnectionStatus('connected', 'Connected (Poll)');
+                this.reconnectAttempts = 0;
+                this.startPolling();
+            })
+            .catch((error) => {
+                console.error('Polling registration failed:', error);
+                this.updateConnectionStatus('disconnected', 'Connection Failed');
+                this.scheduleReconnect();
+            });
+    }
+    
+    registerPolling() {
+        return this.httpRequest('POST', '/api/register', {
+            role: 'display',
+            clientId: this.clientId
+        });
+    }
+    
+    startPolling() {
+        if (this.pollingInterval) {
+            clearInterval(this.pollingInterval);
+        }
+        
+        // Initial poll
+        this.poll();
+        
+        // Continue polling at regular intervals
+        this.pollingInterval = setInterval(() => {
+            this.poll();
+        }, this.pollDelay);
+    }
+    
+    stopPolling() {
+        if (this.pollingInterval) {
+            clearInterval(this.pollingInterval);
+            this.pollingInterval = null;
+        }
+    }
+    
+    poll() {
+        this.httpRequest('GET', '/api/poll?clientId=' + encodeURIComponent(this.clientId) + 
+                        '&lastEventId=' + this.lastEventId)
+            .then((response) => {
+                if (response && response.events && response.events.length > 0) {
+                    response.events.forEach((event) => {
+                        this.handleMessage(event.data);
+                        if (event.id > this.lastEventId) {
+                            this.lastEventId = event.id;
+                        }
+                    });
+                }
+            })
+            .catch((error) => {
+                console.error('Polling error:', error);
+                this.updateConnectionStatus('disconnected', 'Poll Failed');
+                this.stopPolling();
+                this.scheduleReconnect();
+            });
+    }
+    
+    // ========================================
+    // HTTP Request Helper (for polling)
+    // ========================================
+    
+    httpRequest(method, url, data) {
+        return new Promise((resolve, reject) => {
+            var xhr;
+            
+            // Support for older browsers
+            if (window.XMLHttpRequest) {
+                xhr = new XMLHttpRequest();
+            } else if (window.ActiveXObject) {
+                // IE6 and older
+                try {
+                    xhr = new ActiveXObject('Msxml2.XMLHTTP');
+                } catch (e) {
+                    try {
+                        xhr = new ActiveXObject('Microsoft.XMLHTTP');
+                    } catch (e2) {
+                        reject(new Error('XMLHttpRequest not supported'));
+                        return;
+                    }
+                }
+            } else {
+                reject(new Error('XMLHttpRequest not supported'));
+                return;
+            }
+            
+            xhr.open(method, url, true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            
+            // Timeout for old devices
+            if (typeof xhr.timeout !== 'undefined') {
+                xhr.timeout = 30000; // 30 second timeout
+            }
+            
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === 4) {
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        try {
+                            var response = xhr.responseText ? JSON.parse(xhr.responseText) : {};
+                            resolve(response);
+                        } catch (e) {
+                            resolve({});
+                        }
+                    } else {
+                        reject(new Error('HTTP ' + xhr.status));
+                    }
+                }
+            };
+            
+            xhr.onerror = function() {
+                reject(new Error('Network error'));
+            };
+            
+            if (typeof xhr.ontimeout !== 'undefined') {
+                xhr.ontimeout = function() {
+                    reject(new Error('Request timeout'));
+                };
+            }
+            
+            if (data) {
+                xhr.send(JSON.stringify(data));
+            } else {
+                xhr.send();
+            }
+        });
+    }
+    
+    // ========================================
+    // Reconnection Logic
+    // ========================================
     
     scheduleReconnect() {
         if (this.reconnectAttempts < this.maxReconnectAttempts) {
             this.reconnectAttempts++;
-            const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
+            var delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
             
-            this.updateConnectionStatus('connecting', `Reconnecting in ${Math.ceil(delay / 1000)}s...`);
+            this.updateConnectionStatus('connecting', 'Reconnecting in ' + Math.ceil(delay / 1000) + 's...');
             
-            setTimeout(() => {
-                this.connectWebSocket();
+            var self = this;
+            setTimeout(function() {
+                self.connect();
             }, delay);
         } else {
             this.updateConnectionStatus('disconnected', 'Max reconnect attempts reached');
@@ -102,14 +295,53 @@ class TeleprompterDisplay {
     }
     
     setupReconnection() {
+        var self = this;
+        
         // Try to reconnect when the page becomes visible again
-        document.addEventListener('visibilitychange', () => {
-            if (!document.hidden && (!this.ws || this.ws.readyState !== WebSocket.OPEN)) {
-                this.reconnectAttempts = 0;
-                this.connectWebSocket();
-            }
-        });
+        if (document.addEventListener) {
+            document.addEventListener('visibilitychange', function() {
+                if (!document.hidden) {
+                    var needsReconnect = false;
+                    
+                    if (self.connectionType === 'websocket') {
+                        needsReconnect = !self.connection || self.connection.readyState !== WebSocket.OPEN;
+                    } else if (self.connectionType === 'polling') {
+                        needsReconnect = !self.pollingInterval;
+                    } else {
+                        needsReconnect = true;
+                    }
+                    
+                    if (needsReconnect) {
+                        self.reconnectAttempts = 0;
+                        self.connect();
+                    }
+                }
+            });
+        }
     }
+    
+    // ========================================
+    // Send Messages (works with both connections)
+    // ========================================
+    
+    send(data) {
+        if (this.connectionType === 'websocket' && this.connection && 
+            this.connection.readyState === WebSocket.OPEN) {
+            this.connection.send(JSON.stringify(data));
+        } else if (this.connectionType === 'polling') {
+            // Send via HTTP POST for polling mode
+            this.httpRequest('POST', '/api/send', {
+                clientId: this.clientId,
+                message: data
+            }).catch(function(error) {
+                console.error('Failed to send message:', error);
+            });
+        }
+    }
+    
+    // ========================================
+    // Message Handling
+    // ========================================
     
     handleMessage(data) {
         switch (data.type) {
@@ -131,7 +363,7 @@ class TeleprompterDisplay {
                 break;
                 
             case 'setSegmentLength':
-                this.segmentDuration = (data.totalSeconds || data.value || 600) * 1000; // Convert to milliseconds
+                this.segmentDuration = (data.totalSeconds || data.value || 600) * 1000;
                 this.updateCountdownDisplay();
                 break;
                 
@@ -185,7 +417,7 @@ class TeleprompterDisplay {
         
         this.speed = state.speed;
         this.fontSize = state.fontSize;
-        this.segmentDuration = (state.segmentLength || 600) * 1000; // Convert seconds to milliseconds
+        this.segmentDuration = (state.segmentLength || 600) * 1000;
         
         this.prompterText.style.fontSize = this.fontSize + 'px';
         this.setMirrorMode(state.mirrorMode);
@@ -209,11 +441,25 @@ class TeleprompterDisplay {
         this.updateCountdownDisplay();
     }
     
+    // ========================================
+    // Display Methods
+    // ========================================
+    
     setPrompterText(text) {
         if (typeof text === 'string') {
-            // Convert plain text to paragraphs
-            const paragraphs = text.split('\n\n').filter(p => p.trim().length > 0);
-            this.prompterText.innerHTML = paragraphs.map(p => `<p>${p.trim()}</p>`).join('');
+            var paragraphs = text.split('\n\n');
+            var filtered = [];
+            for (var i = 0; i < paragraphs.length; i++) {
+                var trimmed = paragraphs[i].replace(/^\s+|\s+$/g, '');
+                if (trimmed.length > 0) {
+                    filtered.push(trimmed);
+                }
+            }
+            var html = '';
+            for (var j = 0; j < filtered.length; j++) {
+                html += '<p>' + filtered[j] + '</p>';
+            }
+            this.prompterText.innerHTML = html;
         } else {
             this.prompterText.innerHTML = text;
         }
@@ -221,65 +467,62 @@ class TeleprompterDisplay {
     
     setMirrorMode(enabled) {
         if (enabled) {
-            document.body.classList.add('mirror-mode');
+            this.addClass(document.body, 'mirror-mode');
         } else {
-            document.body.classList.remove('mirror-mode');
+            this.removeClass(document.body, 'mirror-mode');
         }
     }
     
     setHideTimer(enabled) {
-        const timerDisplay = document.querySelector('.timer-display');
-        if (enabled) {
-            timerDisplay.style.display = 'none';
-        } else {
-            timerDisplay.style.display = 'flex';
+        var timerDisplay = document.querySelector('.timer-display');
+        if (timerDisplay) {
+            timerDisplay.style.display = enabled ? 'none' : 'flex';
         }
     }
     
     setOnAir(enabled) {
         if (enabled) {
-            this.onAirIndicator.classList.add('active');
+            this.addClass(this.onAirIndicator, 'active');
         } else {
-            this.onAirIndicator.classList.remove('active');
+            this.removeClass(this.onAirIndicator, 'active');
         }
     }
     
     setScheduledStart(scheduledTime) {
         this.scheduledStartTime = scheduledTime;
-        const targetDate = new Date(scheduledTime);
-        this.countdownTarget.textContent = `Starting at: ${targetDate.toLocaleTimeString()}`;
+        var targetDate = new Date(scheduledTime);
+        this.countdownTarget.textContent = 'Starting at: ' + targetDate.toLocaleTimeString();
         
-        this.scheduledCountdown.classList.add('active');
+        this.addClass(this.scheduledCountdown, 'active');
         this.startScheduledCountdown();
     }
     
     clearScheduledStart() {
         this.scheduledStartTime = null;
-        this.scheduledCountdown.classList.remove('active');
+        this.removeClass(this.scheduledCountdown, 'active');
         this.stopScheduledCountdown();
     }
     
     startScheduledCountdown() {
-        this.stopScheduledCountdown(); // Clear any existing interval
+        this.stopScheduledCountdown();
         
-        this.scheduledCountdownInterval = setInterval(() => {
-            const now = Date.now();
-            const timeRemaining = this.scheduledStartTime - now;
+        var self = this;
+        this.scheduledCountdownInterval = setInterval(function() {
+            var now = Date.now();
+            var timeRemaining = self.scheduledStartTime - now;
             
             if (timeRemaining <= 0) {
-                // Time's up - start the prompter automatically
-                this.clearScheduledStart();
-                this.autoStart();
+                self.clearScheduledStart();
+                self.autoStart();
                 return;
             }
             
-            // Update countdown display
-            const hours = Math.floor(timeRemaining / (1000 * 60 * 60));
-            const minutes = Math.floor((timeRemaining % (1000 * 60 * 60)) / (1000 * 60));
-            const seconds = Math.floor((timeRemaining % (1000 * 60)) / 1000);
+            var hours = Math.floor(timeRemaining / (1000 * 60 * 60));
+            var minutes = Math.floor((timeRemaining % (1000 * 60 * 60)) / (1000 * 60));
+            var seconds = Math.floor((timeRemaining % (1000 * 60)) / 1000);
             
-            this.countdownTime.textContent = 
-                `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+            self.countdownTime.textContent = 
+                self.padZero(hours) + ':' + self.padZero(minutes) + ':' + self.padZero(seconds);
         }, 1000);
     }
     
@@ -291,9 +534,12 @@ class TeleprompterDisplay {
     }
     
     autoStart() {
-        // Simulate receiving a start message from the server
         this.start(Date.now(), 0);
     }
+    
+    // ========================================
+    // Playback Control
+    // ========================================
     
     start(startTime, pausedTime) {
         this.isPlaying = true;
@@ -324,43 +570,59 @@ class TeleprompterDisplay {
         this.stopScrolling();
         this.stopTimer();
         
-        // Reset text position to starting position (below screen)
         this.prompterText.style.transform = 'translateY(0%)';
         this.updateDisplay();
     }
     
     startScrolling() {
-        const scroll = () => {
-            if (!this.isPlaying) return;
+        var self = this;
+        
+        // Use requestAnimationFrame if available, otherwise fall back to setTimeout
+        var animate = window.requestAnimationFrame || 
+                      window.webkitRequestAnimationFrame || 
+                      window.mozRequestAnimationFrame ||
+                      function(callback) { return setTimeout(callback, 16); };
+        
+        var scroll = function() {
+            if (!self.isPlaying) return;
             
-            // Calculate scroll speed based on words per minute
-            const wordsPerSecond = this.speed / 60;
-            const pixelsPerSecond = wordsPerSecond * 12; // Approximate pixels per word
-            const pixelsPerFrame = pixelsPerSecond / 60; // 60 FPS
+            var wordsPerSecond = self.speed / 60;
+            var pixelsPerSecond = wordsPerSecond * 12;
+            var pixelsPerFrame = pixelsPerSecond / 60;
             
-            this.currentPosition += pixelsPerFrame;
+            self.currentPosition += pixelsPerFrame;
             
-            // Start from below screen (100%) and scroll up to show content naturally
-            // The text will scroll from bottom to top, showing all content from the beginning
-            const translateY = -(this.currentPosition / window.innerHeight) * 100;
-            this.prompterText.style.transform = `translateY(${translateY}%)`;
+            var translateY = -(self.currentPosition / window.innerHeight) * 100;
             
-            this.animationId = requestAnimationFrame(scroll);
+            // Use vendor-prefixed transforms for older browsers
+            var transform = 'translateY(' + translateY + '%)';
+            self.prompterText.style.transform = transform;
+            self.prompterText.style.webkitTransform = transform;
+            self.prompterText.style.mozTransform = transform;
+            self.prompterText.style.msTransform = transform;
+            self.prompterText.style.oTransform = transform;
+            
+            self.animationId = animate(scroll);
         };
         
-        this.animationId = requestAnimationFrame(scroll);
+        self.animationId = animate(scroll);
     }
     
     stopScrolling() {
         if (this.animationId) {
-            cancelAnimationFrame(this.animationId);
+            var cancel = window.cancelAnimationFrame || 
+                         window.webkitCancelAnimationFrame || 
+                         window.mozCancelAnimationFrame ||
+                         clearTimeout;
+            cancel(this.animationId);
             this.animationId = null;
         }
     }
     
     startTimer() {
-        this.timerInterval = setInterval(() => {
-            this.updateDisplay();
+        var self = this;
+        this.timerInterval = setInterval(function() {
+            self.updateDisplay();
         }, 1000);
     }
     
@@ -372,78 +634,171 @@ class TeleprompterDisplay {
     }
     
     updateDisplay() {
-        const elapsed = this.startTime ? Date.now() - this.startTime : this.pausedTime;
-        const remaining = Math.max(0, this.segmentDuration - elapsed);
+        var elapsed = this.startTime ? Date.now() - this.startTime : this.pausedTime;
+        var remaining = Math.max(0, this.segmentDuration - elapsed);
         
         this.updateCountdownDisplay(remaining);
         this.updateElapsedDisplay(elapsed);
     }
     
-    updateCountdownDisplay(remaining = this.segmentDuration) {
-        const minutes = Math.floor(remaining / 60000);
-        const seconds = Math.floor((remaining % 60000) / 1000);
+    updateCountdownDisplay(remaining) {
+        if (typeof remaining === 'undefined') {
+            remaining = this.segmentDuration;
+        }
         
-        this.countdownTimer.textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+        var minutes = Math.floor(remaining / 60000);
+        var seconds = Math.floor((remaining % 60000) / 1000);
         
-        // Update timer color based on remaining time
+        this.countdownTimer.textContent = this.padZero(minutes) + ':' + this.padZero(seconds);
+        
         this.countdownTimer.className = '';
         if (remaining < 60000) {
-            this.countdownTimer.classList.add('danger');
+            this.addClass(this.countdownTimer, 'danger');
         } else if (remaining < 300000) {
-            this.countdownTimer.classList.add('warning');
+            this.addClass(this.countdownTimer, 'warning');
         }
     }
     
     updateElapsedDisplay(elapsed) {
-        const minutes = Math.floor(elapsed / 60000);
-        const seconds = Math.floor((elapsed % 60000) / 1000);
+        var minutes = Math.floor(elapsed / 60000);
+        var seconds = Math.floor((elapsed % 60000) / 1000);
         
-        this.elapsedTime.textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+        this.elapsedTime.textContent = this.padZero(minutes) + ':' + this.padZero(seconds);
     }
     
     updateConnectionStatus(status, text) {
-        this.statusIndicator.className = `status-indicator ${status}`;
+        this.statusIndicator.className = 'status-indicator ' + status;
         this.statusText.textContent = text;
     }
     
+    // ========================================
+    // Keyboard Shortcuts
+    // ========================================
+    
     bindKeyboardShortcuts() {
-        document.addEventListener('keydown', (e) => {
-            // F11 or F for fullscreen
-            if (e.key === 'F11' || e.key === 'f' || e.key === 'F') {
-                e.preventDefault();
-                this.toggleFullscreen();
+        var self = this;
+        
+        var keyHandler = function(e) {
+            if (e.key === 'F11' || e.key === 'f' || e.key === 'F' ||
+                e.keyCode === 122 || e.keyCode === 70) {
+                if (e.preventDefault) e.preventDefault();
+                self.toggleFullscreen();
             }
             
-            // Escape to exit fullscreen
-            if (e.key === 'Escape') {
-                if (document.fullscreenElement) {
-                    document.exitFullscreen();
+            if (e.key === 'Escape' || e.keyCode === 27) {
+                if (document.fullscreenElement || document.webkitFullscreenElement || 
+                    document.mozFullScreenElement || document.msFullscreenElement) {
+                    self.exitFullscreen();
                 }
             }
-        });
+        };
+        
+        if (document.addEventListener) {
+            document.addEventListener('keydown', keyHandler);
+        } else if (document.attachEvent) {
+            document.attachEvent('onkeydown', keyHandler);
+        }
         
         // Handle fullscreen change
-        document.addEventListener('fullscreenchange', () => {
-            if (document.fullscreenElement) {
-                document.body.classList.add('fullscreen');
+        var fullscreenHandler = function() {
+            if (document.fullscreenElement || document.webkitFullscreenElement || 
+                document.mozFullScreenElement || document.msFullscreenElement) {
+                self.addClass(document.body, 'fullscreen');
             } else {
-                document.body.classList.remove('fullscreen');
+                self.removeClass(document.body, 'fullscreen');
             }
-        });
+        };
+        
+        if (document.addEventListener) {
+            document.addEventListener('fullscreenchange', fullscreenHandler);
+            document.addEventListener('webkitfullscreenchange', fullscreenHandler);
+            document.addEventListener('mozfullscreenchange', fullscreenHandler);
+            document.addEventListener('MSFullscreenChange', fullscreenHandler);
+        }
     }
     
     toggleFullscreen() {
-        if (!document.fullscreenElement) {
-            document.documentElement.requestFullscreen().catch(err => {
-                console.error('Error attempting to enable fullscreen:', err);
-            });
+        var elem = document.documentElement;
+        
+        if (!document.fullscreenElement && !document.webkitFullscreenElement && 
+            !document.mozFullScreenElement && !document.msFullscreenElement) {
+            
+            if (elem.requestFullscreen) {
+                elem.requestFullscreen();
+            } else if (elem.webkitRequestFullscreen) {
+                elem.webkitRequestFullscreen();
+            } else if (elem.mozRequestFullScreen) {
+                elem.mozRequestFullScreen();
+            } else if (elem.msRequestFullscreen) {
+                elem.msRequestFullscreen();
+            }
         } else {
+            this.exitFullscreen();
+        }
+    }
+    
+    exitFullscreen() {
+        if (document.exitFullscreen) {
             document.exitFullscreen();
+        } else if (document.webkitExitFullscreen) {
+            document.webkitExitFullscreen();
+        } else if (document.mozCancelFullScreen) {
+            document.mozCancelFullScreen();
+        } else if (document.msExitFullscreen) {
+            document.msExitFullscreen();
+        }
+    }
+    
+    // ========================================
+    // Utility Methods (for older browser support)
+    // ========================================
+    
+    padZero(num) {
+        return (num < 10 ? '0' : '') + num;
+    }
+    
+    addClass(element, className) {
+        if (!element) return;
+        if (element.classList) {
+            element.classList.add(className);
+        } else {
+            var classes = element.className.split(' ');
+            if (classes.indexOf(className) === -1) {
+                element.className += ' ' + className;
+            }
+        }
+    }
+    
+    removeClass(element, className) {
+        if (!element) return;
+        if (element.classList) {
+            element.classList.remove(className);
+        } else {
+            var classes = element.className.split(' ');
+            var newClasses = [];
+            for (var i = 0; i < classes.length; i++) {
+                if (classes[i] !== className) {
+                    newClasses.push(classes[i]);
+                }
+            }
+            element.className = newClasses.join(' ');
         }
     }
 }
 
 // Initialize display when page loads
-document.addEventListener('DOMContentLoaded', () => {
-    new TeleprompterDisplay();
-});
+if (document.addEventListener) {
+    document.addEventListener('DOMContentLoaded', function() {
+        new TeleprompterDisplay();
+    });
+} else if (document.attachEvent) {
+    document.attachEvent('onreadystatechange', function() {
+        if (document.readyState === 'complete') {
+            new TeleprompterDisplay();
+        }
+    });
+} else {
+    window.onload = function() {
+        new TeleprompterDisplay();
+    };
+}
