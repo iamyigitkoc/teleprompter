@@ -403,17 +403,48 @@ class TeleprompterDisplay {
     
     scrollUp(pixels) {
         this.currentPosition = Math.max(0, this.currentPosition - pixels);
-        this.updateScrollPosition();
+        this.smoothScrollTo(this.currentPosition);
     }
     
     scrollDown(pixels) {
         this.currentPosition += pixels;
-        this.updateScrollPosition();
+        this.smoothScrollTo(this.currentPosition);
     }
     
     setScrollPosition(position) {
         this.currentPosition = Math.max(0, position);
-        this.updateScrollPosition();
+        this.smoothScrollTo(this.currentPosition);
+    }
+    
+    smoothScrollTo(position) {
+        var self = this;
+        var startPosition = parseFloat(this.prompterText.style.transform.replace(/[^0-9.-]/g, '')) || 0;
+        var startPixels = -(startPosition / 100) * window.innerHeight;
+        var targetPixels = position;
+        var distance = targetPixels - startPixels;
+        var duration = 300; // ms
+        var startTime = null;
+        
+        function animate(currentTime) {
+            if (!startTime) startTime = currentTime;
+            var elapsed = currentTime - startTime;
+            var progress = Math.min(elapsed / duration, 1);
+            
+            // Ease out cubic
+            var easeProgress = 1 - Math.pow(1 - progress, 3);
+            
+            var currentPixels = startPixels + (distance * easeProgress);
+            var translateY = -(currentPixels / window.innerHeight) * 100;
+            var transform = 'translateY(' + translateY + '%)';
+            self.prompterText.style.transform = transform;
+            self.prompterText.style.webkitTransform = transform;
+            
+            if (progress < 1) {
+                requestAnimationFrame(animate);
+            }
+        }
+        
+        requestAnimationFrame(animate);
     }
     
     updateScrollPosition() {
@@ -426,40 +457,45 @@ class TeleprompterDisplay {
     calculateParagraphPositions() {
         this.paragraphPositions = [];
         var paragraphs = this.prompterText.querySelectorAll('p');
-        var baseOffset = this.prompterText.offsetTop;
         
         for (var i = 0; i < paragraphs.length; i++) {
-            this.paragraphPositions.push(paragraphs[i].offsetTop - baseOffset);
+            // Get position relative to viewport top, accounting for current scroll
+            var rect = paragraphs[i].getBoundingClientRect();
+            var scrollOffset = this.currentPosition;
+            var absoluteTop = rect.top + scrollOffset;
+            this.paragraphPositions.push(absoluteTop);
         }
     }
     
     goToNextParagraph() {
-        if (this.paragraphPositions.length === 0) {
-            this.calculateParagraphPositions();
-        }
+        this.calculateParagraphPositions();
         
-        // Find the next paragraph after current position
+        if (this.paragraphPositions.length === 0) return;
+        
+        // Find the next paragraph after current position (with small threshold)
+        var threshold = 50;
         for (var i = 0; i < this.paragraphPositions.length; i++) {
-            if (this.paragraphPositions[i] > this.currentPosition + 10) {
+            if (this.paragraphPositions[i] > this.currentPosition + threshold) {
                 this.currentParagraphIndex = i;
-                this.currentPosition = this.paragraphPositions[i];
-                this.updateScrollPosition();
+                this.currentPosition = Math.max(0, this.paragraphPositions[i] - 100); // Offset to show some context
+                this.smoothScrollTo(this.currentPosition);
                 return;
             }
         }
     }
     
     goToPrevParagraph() {
-        if (this.paragraphPositions.length === 0) {
-            this.calculateParagraphPositions();
-        }
+        this.calculateParagraphPositions();
         
-        // Find the previous paragraph before current position
+        if (this.paragraphPositions.length === 0) return;
+        
+        // Find the previous paragraph before current position (with threshold)
+        var threshold = 50;
         for (var i = this.paragraphPositions.length - 1; i >= 0; i--) {
-            if (this.paragraphPositions[i] < this.currentPosition - 10) {
+            if (this.paragraphPositions[i] < this.currentPosition - threshold) {
                 this.currentParagraphIndex = i;
-                this.currentPosition = this.paragraphPositions[i];
-                this.updateScrollPosition();
+                this.currentPosition = Math.max(0, this.paragraphPositions[i] - 100);
+                this.smoothScrollTo(this.currentPosition);
                 return;
             }
         }
@@ -467,18 +503,16 @@ class TeleprompterDisplay {
         // Go to start if no previous paragraph
         this.currentPosition = 0;
         this.currentParagraphIndex = 0;
-        this.updateScrollPosition();
+        this.smoothScrollTo(this.currentPosition);
     }
     
     goToParagraphByIndex(index) {
-        if (this.paragraphPositions.length === 0) {
-            this.calculateParagraphPositions();
-        }
+        this.calculateParagraphPositions();
         
         if (index >= 0 && index < this.paragraphPositions.length) {
             this.currentParagraphIndex = index;
-            this.currentPosition = this.paragraphPositions[index];
-            this.updateScrollPosition();
+            this.currentPosition = Math.max(0, this.paragraphPositions[index] - 100);
+            this.smoothScrollTo(this.currentPosition);
         }
     }
     

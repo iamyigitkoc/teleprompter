@@ -128,14 +128,85 @@
         this.updateCountdownDisplay(); this.calculateParagraphPositions();
     };
     
-    TeleprompterDisplay.prototype.scrollUp = function(pixels) { this.currentPosition = Math.max(0, this.currentPosition - pixels); this.updateScrollPosition(); };
-    TeleprompterDisplay.prototype.scrollDown = function(pixels) { this.currentPosition = this.currentPosition + pixels; this.updateScrollPosition(); };
-    TeleprompterDisplay.prototype.setScrollPosition = function(pos) { this.currentPosition = Math.max(0, pos); this.updateScrollPosition(); };
+    TeleprompterDisplay.prototype.scrollUp = function(pixels) { this.currentPosition = Math.max(0, this.currentPosition - pixels); this.smoothScrollTo(this.currentPosition); };
+    TeleprompterDisplay.prototype.scrollDown = function(pixels) { this.currentPosition = this.currentPosition + pixels; this.smoothScrollTo(this.currentPosition); };
+    TeleprompterDisplay.prototype.setScrollPosition = function(pos) { this.currentPosition = Math.max(0, pos); this.smoothScrollTo(this.currentPosition); };
+    
+    TeleprompterDisplay.prototype.smoothScrollTo = function(position) {
+        var self = this;
+        var vh = window.innerHeight || document.documentElement.clientHeight || 600;
+        var currentTransform = self.prompterText.style.transform || 'translateY(0%)';
+        var match = currentTransform.match(/translateY\(([-0-9.]+)%\)/);
+        var startPercent = match ? parseFloat(match[1]) : 0;
+        var startPixels = -(startPercent / 100) * vh;
+        var targetPixels = position;
+        var distance = targetPixels - startPixels;
+        var duration = 300;
+        var startTime = null;
+        
+        var raf = window.requestAnimationFrame || window.webkitRequestAnimationFrame || function(cb) { return setTimeout(cb, 16); };
+        
+        function animate(currentTime) {
+            if (!startTime) startTime = currentTime;
+            var elapsed = currentTime - startTime;
+            var progress = Math.min(elapsed / duration, 1);
+            var easeProgress = 1 - Math.pow(1 - progress, 3);
+            var currentPixels = startPixels + (distance * easeProgress);
+            var translateY = -(currentPixels / vh) * 100;
+            self.setTransform(self.prompterText, 'translateY(' + translateY + '%)');
+            if (progress < 1) { raf(animate); }
+        }
+        raf(animate);
+    };
+    
     TeleprompterDisplay.prototype.updateScrollPosition = function() { var vh = window.innerHeight || document.documentElement.clientHeight || 600; var ty = -(this.currentPosition / vh) * 100; this.setTransform(this.prompterText, 'translateY(' + ty + '%)'); };
-    TeleprompterDisplay.prototype.calculateParagraphPositions = function() { this.paragraphPositions = []; if (!this.prompterText) return; var ps = this.prompterText.getElementsByTagName('p'); var base = this.prompterText.offsetTop; for (var i = 0; i < ps.length; i++) this.paragraphPositions.push(ps[i].offsetTop - base); };
-    TeleprompterDisplay.prototype.goToNextParagraph = function() { if (!this.paragraphPositions.length) this.calculateParagraphPositions(); for (var i = 0; i < this.paragraphPositions.length; i++) { if (this.paragraphPositions[i] > this.currentPosition + 10) { this.currentPosition = this.paragraphPositions[i]; this.updateScrollPosition(); return; } } };
-    TeleprompterDisplay.prototype.goToPrevParagraph = function() { if (!this.paragraphPositions.length) this.calculateParagraphPositions(); for (var i = this.paragraphPositions.length - 1; i >= 0; i--) { if (this.paragraphPositions[i] < this.currentPosition - 10) { this.currentPosition = this.paragraphPositions[i]; this.updateScrollPosition(); return; } } this.currentPosition = 0; this.updateScrollPosition(); };
-    TeleprompterDisplay.prototype.goToParagraphByIndex = function(idx) { if (!this.paragraphPositions.length) this.calculateParagraphPositions(); if (idx >= 0 && idx < this.paragraphPositions.length) { this.currentPosition = this.paragraphPositions[idx]; this.updateScrollPosition(); } };
+    
+    TeleprompterDisplay.prototype.calculateParagraphPositions = function() { 
+        this.paragraphPositions = []; 
+        if (!this.prompterText) return; 
+        var ps = this.prompterText.getElementsByTagName('p');
+        for (var i = 0; i < ps.length; i++) {
+            var rect = ps[i].getBoundingClientRect();
+            var absoluteTop = rect.top + this.currentPosition;
+            this.paragraphPositions.push(absoluteTop);
+        }
+    };
+    
+    TeleprompterDisplay.prototype.goToNextParagraph = function() { 
+        this.calculateParagraphPositions();
+        if (this.paragraphPositions.length === 0) return;
+        var threshold = 50;
+        for (var i = 0; i < this.paragraphPositions.length; i++) { 
+            if (this.paragraphPositions[i] > this.currentPosition + threshold) { 
+                this.currentPosition = Math.max(0, this.paragraphPositions[i] - 100); 
+                this.smoothScrollTo(this.currentPosition); 
+                return; 
+            } 
+        } 
+    };
+    
+    TeleprompterDisplay.prototype.goToPrevParagraph = function() { 
+        this.calculateParagraphPositions();
+        if (this.paragraphPositions.length === 0) return;
+        var threshold = 50;
+        for (var i = this.paragraphPositions.length - 1; i >= 0; i--) { 
+            if (this.paragraphPositions[i] < this.currentPosition - threshold) { 
+                this.currentPosition = Math.max(0, this.paragraphPositions[i] - 100); 
+                this.smoothScrollTo(this.currentPosition); 
+                return; 
+            } 
+        } 
+        this.currentPosition = 0; 
+        this.smoothScrollTo(this.currentPosition); 
+    };
+    
+    TeleprompterDisplay.prototype.goToParagraphByIndex = function(idx) { 
+        this.calculateParagraphPositions();
+        if (idx >= 0 && idx < this.paragraphPositions.length) { 
+            this.currentPosition = Math.max(0, this.paragraphPositions[idx] - 100); 
+            this.smoothScrollTo(this.currentPosition); 
+        } 
+    };
     
     TeleprompterDisplay.prototype.setPrompterText = function(text) { var self = this; if (!self.prompterText) return; if (typeof text === 'string') { var ps = text.split('\n\n'), html = ''; for (var i = 0; i < ps.length; i++) { var t = ps[i].replace(/^\s+|\s+$/g, ''); if (t) html += '<p>' + t + '</p>'; } self.prompterText.innerHTML = html; } else { self.prompterText.innerHTML = text || ''; } setTimeout(function() { self.calculateParagraphPositions(); }, 100); };
     TeleprompterDisplay.prototype.setScheduledStart = function(time) { var self = this; self.scheduledStartTime = time; if (self.countdownTarget) self.countdownTarget.textContent = 'Starting at: ' + new Date(time).toLocaleTimeString(); addClass(self.scheduledCountdown, 'active'); self.stopScheduledCountdown(); self.scheduledCountdownInterval = setInterval(function() { var rem = self.scheduledStartTime - Date.now(); if (rem <= 0) { self.clearScheduledStart(); self.start(Date.now(), 0); return; } var h = Math.floor(rem / 3600000), m = Math.floor((rem % 3600000) / 60000), s = Math.floor((rem % 60000) / 1000); if (self.countdownTime) self.countdownTime.textContent = padZero(h) + ':' + padZero(m) + ':' + padZero(s); }, 1000); };

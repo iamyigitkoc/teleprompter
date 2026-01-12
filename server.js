@@ -210,7 +210,7 @@ function handlePollingAPI(req, res, urlPath) {
                 const client = pollingClients.get(clientId);
                 client.lastPoll = Date.now();
                 
-                handleClientMessage(message, client.role);
+                handleClientMessage(message, client.role, null);
                 
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ success: true }));
@@ -248,58 +248,68 @@ function handlePollingAPI(req, res, urlPath) {
     return false;
 }
 
-function handleClientMessage(data, role) {
+function handleClientMessage(data, role, senderWs) {
     switch (data.type) {
         case 'setText':
             currentState.text = data.content;
             broadcastToDisplays({ type: 'setText', content: data.content });
+            broadcastToControllers({ type: 'setText', content: data.content }, senderWs);
             break;
             
         case 'setSpeed':
             currentState.speed = data.value;
             broadcastToDisplays({ type: 'setSpeed', value: data.value });
+            broadcastToControllers({ type: 'setSpeed', value: data.value }, senderWs);
             break;
             
         case 'setFontSize':
             currentState.fontSize = data.value;
             broadcastToDisplays({ type: 'setFontSize', value: data.value });
+            broadcastToControllers({ type: 'setFontSize', value: data.value }, senderWs);
             break;
             
         case 'setSegmentLength':
             currentState.segmentLength = data.totalSeconds || data.value || 10 * 60;
             currentState.segmentMinutes = data.minutes || Math.floor(currentState.segmentLength / 60);
             currentState.segmentSeconds = data.seconds || (currentState.segmentLength % 60);
-            broadcastToDisplays({ 
+            const segmentMsg = { 
                 type: 'setSegmentLength', 
                 totalSeconds: currentState.segmentLength,
                 minutes: currentState.segmentMinutes,
                 seconds: currentState.segmentSeconds
-            });
+            };
+            broadcastToDisplays(segmentMsg);
+            broadcastToControllers(segmentMsg, senderWs);
             break;
             
         case 'setMirrorMode':
             currentState.mirrorMode = data.enabled;
             broadcastToDisplays({ type: 'setMirrorMode', enabled: data.enabled });
+            broadcastToControllers({ type: 'setMirrorMode', enabled: data.enabled }, senderWs);
             break;
             
         case 'setHideTimer':
             currentState.hideTimer = data.enabled;
             broadcastToDisplays({ type: 'setHideTimer', enabled: data.enabled });
+            broadcastToControllers({ type: 'setHideTimer', enabled: data.enabled }, senderWs);
             break;
             
         case 'setOnAir':
             currentState.onAir = data.enabled;
             broadcastToDisplays({ type: 'setOnAir', enabled: data.enabled });
+            broadcastToControllers({ type: 'setOnAir', enabled: data.enabled }, senderWs);
             break;
             
         case 'setScheduledStart':
             currentState.scheduledStartTime = data.scheduledTime;
             broadcastToDisplays({ type: 'setScheduledStart', scheduledTime: data.scheduledTime });
+            broadcastToControllers({ type: 'setScheduledStart', scheduledTime: data.scheduledTime }, senderWs);
             break;
             
         case 'clearScheduledStart':
             currentState.scheduledStartTime = null;
             broadcastToDisplays({ type: 'clearScheduledStart' });
+            broadcastToControllers({ type: 'clearScheduledStart' }, senderWs);
             break;
             
         case 'start':
@@ -308,23 +318,29 @@ function handleClientMessage(data, role) {
             currentState.onAir = true;
             currentState.scheduledStartTime = null;
             currentState.startTime = Date.now() - (currentState.pausedTime || 0);
-            broadcastToDisplays({ 
+            const startMsg = { 
                 type: 'start', 
                 startTime: currentState.startTime,
                 pausedTime: currentState.pausedTime
-            });
+            };
+            broadcastToDisplays(startMsg);
             broadcastToDisplays({ type: 'setOnAir', enabled: true });
             broadcastToDisplays({ type: 'clearScheduledStart' });
+            broadcastToControllers(startMsg, senderWs);
+            broadcastToControllers({ type: 'setOnAir', enabled: true }, senderWs);
+            broadcastToControllers({ type: 'clearScheduledStart' }, senderWs);
             break;
             
         case 'pause':
             currentState.isPlaying = false;
             currentState.isPaused = true;
             currentState.pausedTime = Date.now() - currentState.startTime;
-            broadcastToDisplays({ 
+            const pauseMsg = { 
                 type: 'pause',
                 pausedTime: currentState.pausedTime
-            });
+            };
+            broadcastToDisplays(pauseMsg);
+            broadcastToControllers(pauseMsg, senderWs);
             break;
             
         case 'reset':
@@ -334,9 +350,10 @@ function handleClientMessage(data, role) {
             currentState.startTime = null;
             currentState.pausedTime = 0;
             broadcastToDisplays({ type: 'reset' });
+            broadcastToControllers({ type: 'reset' }, senderWs);
             break;
         
-        // Scroll Control Messages
+        // Scroll Control Messages (displays only, controllers don't need these)
         case 'scrollUp':
             broadcastToDisplays({ type: 'scrollUp', pixels: data.pixels || 100 });
             break;
@@ -435,7 +452,7 @@ wss.on('connection', (ws, req) => {
             } else if (data.type === 'ping') {
                 ws.send(JSON.stringify({ type: 'pong' }));
             } else {
-                handleClientMessage(data, ws.role);
+                handleClientMessage(data, ws.role, ws);
             }
         } catch (error) {
             console.error('Error parsing message:', error);
@@ -482,11 +499,12 @@ function broadcastToDisplays(message) {
     broadcastToPollingDisplays(message);
 }
 
-function broadcastToControllers(message) {
+function broadcastToControllers(message, excludeWs) {
     const messageStr = JSON.stringify(message);
     
+    // Exclude sender to prevent echo
     clients.controllers.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
+        if (client.readyState === WebSocket.OPEN && client !== excludeWs) {
             client.send(messageStr);
         }
     });
